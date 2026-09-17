@@ -21,6 +21,16 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState("connecting");
   const [message, setMessage] = useState("");
 
+  // Stores the live progress and results of the controlled siege.
+const [siege, setSiege] = useState({
+  running: false,
+  total: 120,
+  completed: 0,
+  accepted: 0,
+  blocked: 0,
+  failed: 0,
+});
+
   /*
     Loads the authoritative auction state when the dashboard first opens.
   */
@@ -69,6 +79,54 @@ function App() {
     }
   }
 
+   /*
+    Requests a controlled local siege and prepares the dashboard to receive
+    live progress updates through Socket.IO.
+  */
+  async function launchSiege() {
+    setMessage("");
+
+    setSiege({
+      running: true,
+      total: 120,
+      completed: 0,
+      accepted: 0,
+      blocked: 0,
+      failed: 0,
+    });
+
+    try {
+      const response = await fetch(`${API_URL}/api/siege/start`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          totalRequests: 120,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        setSiege((current) => ({
+          ...current,
+          running: false,
+        }));
+
+        setMessage(result.reason || "Could not launch siege.");
+      }
+    } catch {
+      setSiege((current) => ({
+        ...current,
+        running: false,
+      }));
+
+      setMessage("Could not contact the siege controller.");
+    }
+  }
+
+
   /*
     Resets Redis state so a fresh demonstration can begin.
   */
@@ -78,6 +136,16 @@ function App() {
     });
 
     setEvents([]);
+
+    setSiege({
+      running: false,
+      total: 120,
+      completed: 0,
+      accepted: 0,
+      blocked: 0,
+      failed: 0,
+    });
+
     setMessage("Auction reset");
   }
 
@@ -100,19 +168,71 @@ function App() {
     });
 
     socket.on("bid-decision", (decision) => {
-      setEvents((currentEvents) => [decision, ...currentEvents].slice(0, 12));
+  // Keep the latest 30 decisions visible without overloading the browser.
+  setEvents((currentEvents) => [
+    decision,
+    ...currentEvents,
+  ].slice(0, 30));
 
-      if (decision.accepted) {
-        setAuction({
-          amount: decision.highestBid,
-          bidderId: decision.bidderId,
-          sequence: decision.sequence,
-        });
-      }
+  if (decision.accepted) {
+    setAuction({
+      amount: decision.highestBid,
+      bidderId: decision.bidderId,
+      sequence: decision.sequence,
     });
+  }
+
+  // Count every simulated request directly from its decision event.
+  if (decision.attackType !== "MANUAL_BID") {
+    setSiege((current) => {
+      const completed = Math.min(
+        current.completed + 1,
+        current.total,
+      );
+
+      return {
+        ...current,
+        completed,
+        accepted:
+          current.accepted + (decision.accepted ? 1 : 0),
+        blocked:
+          current.blocked + (decision.accepted ? 0 : 1),
+        running: completed < current.total,
+      };
+    });
+  }
+});
 
     socket.on("auction-reset", (state) => {
       setAuction(state);
+    });
+
+    // Updates the counters while requests are being processed.
+    socket.on("siege-progress", (statistics) => {
+      setSiege({
+        ...statistics,
+        running: true,
+      });
+    });
+
+    // Marks the simulation as finished while preserving its final totals.
+    socket.on("siege-complete", (summary) => {
+      setSiege({
+        ...summary,
+        running: false,
+      });
+
+      setMessage("Siege completed successfully.");
+    });
+
+    // Restores the controls if the simulator encounters an error.
+    socket.on("siege-error", (error) => {
+      setSiege((current) => ({
+        ...current,
+        running: false,
+      }));
+
+      setMessage(error.message);
     });
 
     // Disconnect when React removes this component.
@@ -142,6 +262,71 @@ function App() {
             ? `Leader: ${auction.bidderId} · Sequence ${auction.sequence}`
             : "Waiting for the opening bid"}
         </span>
+      </section>
+
+        <section className={`siege-panel ${siege.running ? "under-attack" : ""}`}>
+        <div>
+          <p className="eyebrow">
+            {siege.running ? "SYSTEM UNDER ATTACK" : "CHAOS BIDDER SWARM"}
+          </p>
+
+          <h2>
+            {siege.running
+              ? "Siege in progress"
+              : "Attack simulation ready"}
+          </h2>
+
+          <p className="siege-description">
+            Launch 120 controlled concurrent requests containing malicious and
+            legitimate bid patterns.
+          </p>
+        </div>
+
+        <button
+          className="siege-button"
+          type="button"
+          onClick={launchSiege}
+          disabled={siege.running}
+        >
+          {siege.running ? "Defending..." : "Launch Siege"}
+        </button>
+
+        <div className="siege-progress">
+          <div
+            className="siege-progress-fill"
+            style={{
+              width: `${
+                siege.total > 0
+                  ? (siege.completed / siege.total) * 100
+                  : 0
+              }%`,
+            }}
+          />
+        </div>
+
+        <div className="siege-statistics">
+          <article>
+            <span>Processed</span>
+            <strong>
+              {siege.completed}/{siege.total}
+            </strong>
+          </article>
+
+          <article>
+            <span>Accepted</span>
+            <strong className="green">{siege.accepted}</strong>
+          </article>
+
+          <article>
+            <span>Attacks blocked</span>
+            <strong className="red">{siege.blocked}</strong>
+          </article>
+
+          <article>
+            <span>Failed</span>
+            <strong>{siege.failed}</strong>
+          </article>
+        </div>
       </section>
 
       <section className="grid">
@@ -196,10 +381,13 @@ function App() {
                 key={`${decision.requestId}-${decision.timestamp}`}
               >
                 <div>
-                  <strong>
+                   <strong>
                     {decision.accepted ? "ACCEPTED" : "BLOCKED"}
                   </strong>
-                  <span>{decision.reason}</span>
+
+                  <span>
+                    {decision.attackType || "MANUAL_BID"} · {decision.reason}
+                  </span>
                 </div>
 
                 <div className="event-value">
