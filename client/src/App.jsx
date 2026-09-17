@@ -16,7 +16,7 @@ function createEmptySiege() {
   };
 }
 
-// Returns a clean set of auction correctness proofs.
+// Returns a clean set of server-side correctness proofs.
 function createEmptyInvariants() {
   return {
     allPassed: true,
@@ -29,10 +29,11 @@ function createEmptyInvariants() {
 }
 
 /*
-  App manages both the seller and bidder demonstrations while receiving
-  real-time auction events from the backend.
+  App manages the marketplace, seller controls, bidder controls and
+  separate Defense Lab.
 */
 function App() {
+  const [activeSection, setActiveSection] = useState("auction");
   const [role, setRole] = useState("bidder");
   const [item, setItem] = useState(null);
 
@@ -48,8 +49,11 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState("connecting");
   const [message, setMessage] = useState("");
   const [siege, setSiege] = useState(createEmptySiege());
-  const [invariants, setInvariants] = useState(createEmptyInvariants());
-  
+
+  const [invariants, setInvariants] = useState(
+    createEmptyInvariants(),
+  );
+
   const [sellerForm, setSellerForm] = useState({
     name: "",
     description: "",
@@ -59,7 +63,7 @@ function App() {
   });
 
   /*
-    Loads both the active item and authoritative auction state.
+    Loads the active item, auction state and server verification state.
   */
   async function loadApplication() {
     const [
@@ -88,7 +92,7 @@ function App() {
   }
 
   /*
-    Updates one field in the seller form while preserving the others.
+    Updates one seller form field while preserving all other fields.
   */
   function updateSellerField(event) {
     const { name, value } = event.target;
@@ -100,7 +104,7 @@ function App() {
   }
 
   /*
-    Creates a new auction item through the seller API.
+    Creates a new active item through the seller API.
   */
   async function createItem(event) {
     event.preventDefault();
@@ -140,7 +144,7 @@ function App() {
   }
 
   /*
-    Sends a legitimate human bid with a unique replay-protection ID.
+    Sends one legitimate human bid with a unique replay-protection ID.
   */
   async function submitBid(event) {
     event.preventDefault();
@@ -179,7 +183,7 @@ function App() {
   }
 
   /*
-    Closes the current item and prevents further bids at the Redis layer.
+    Closes the active auction and prevents later bids at the Redis layer.
   */
   async function closeAuction() {
     const response = await fetch(`${API_URL}/api/item/close`, {
@@ -199,10 +203,11 @@ function App() {
   }
 
   /*
-    Launches the controlled local Chaos Bidder Swarm.
+    Launches the controlled swarm against only the local auction API.
   */
   async function launchSiege() {
     setMessage("");
+
     setSiege({
       ...createEmptySiege(),
       running: true,
@@ -254,12 +259,12 @@ function App() {
     setEvents([]);
     setSiege(createEmptySiege());
     setInvariants(createEmptyInvariants());
-    setMessage("Auction reset successfully.");    
+    setMessage("Auction reset successfully.");
   }
 
   /*
-    Opens the Socket.IO connection and subscribes to every live event used
-    by the bidder, seller and siege interfaces.
+    Opens the live Socket.IO connection and subscribes to auction events,
+    seller actions, siege progress and invariant verification.
   */
   useEffect(() => {
     loadApplication().catch(() => {
@@ -277,7 +282,7 @@ function App() {
     });
 
     socket.on("bid-decision", (decision) => {
-      // Render only recent events so heavy tests do not freeze the browser.
+      // Limit rendered events so large tests do not freeze the browser.
       setEvents((currentEvents) => [
         decision,
         ...currentEvents,
@@ -291,7 +296,7 @@ function App() {
         });
       }
 
-      // Provide immediate counter updates from the decision stream.
+      // Provide immediate siege updates from the bid event stream.
       if (decision.attackType !== "MANUAL_BID") {
         setSiege((current) => {
           const completed = Math.min(
@@ -313,29 +318,35 @@ function App() {
     });
 
     socket.on("auction-reset", (state) => {
-        setAuction(state);
-      });
-
-      // Receive correctness results calculated by the backend.
-      socket.on("invariant-update", (proof) => {
-        setInvariants(proof);
-      });
-
-      socket.on("item-created", ({ item: newItem, auction: newAuction }) => {      
-      setItem(newItem);
-      setAuction(newAuction);
-      setEvents([]);
-      setSiege(createEmptySiege());
+      setAuction(state);
     });
+
+    socket.on("invariant-update", (proof) => {
+      setInvariants(proof);
+    });
+
+    socket.on(
+      "item-created",
+      ({ item: newItem, auction: newAuction }) => {
+        setItem(newItem);
+        setAuction(newAuction);
+        setEvents([]);
+        setSiege(createEmptySiege());
+        setInvariants(createEmptyInvariants());
+      },
+    );
 
     socket.on("item-updated", (updatedItem) => {
       setItem(updatedItem);
     });
 
-    socket.on("auction-closed", ({ item: closedItem, auction: finalState }) => {
-      setItem(closedItem);
-      setAuction(finalState);
-    });
+    socket.on(
+      "auction-closed",
+      ({ item: closedItem, auction: finalState }) => {
+        setItem(closedItem);
+        setAuction(finalState);
+      },
+    );
 
     socket.on("siege-progress", (statistics) => {
       setSiege({
@@ -362,7 +373,7 @@ function App() {
       setMessage(error.message);
     });
 
-    // Disconnect when React removes this component.
+    // Disconnect when React removes the application.
     return () => {
       socket.disconnect();
     };
@@ -380,179 +391,341 @@ function App() {
           <span className={`connection ${connectionStatus}`}>
             {connectionStatus}
           </span>
-
-          <div className="role-switch">
-            <button
-              className={role === "bidder" ? "active" : ""}
-              type="button"
-              onClick={() => setRole("bidder")}
-            >
-              Bidder
-            </button>
-
-            <button
-              className={role === "seller" ? "active" : ""}
-              type="button"
-              onClick={() => setRole("seller")}
-            >
-              Seller
-            </button>
-          </div>
         </div>
       </header>
 
-      {item && (
-        <section className="item-card">
-          <div className="item-visual">
-            <span>{item.category?.charAt(0) || "A"}</span>
-          </div>
+      <nav className="primary-nav">
+        <button
+          className={activeSection === "auction" ? "active" : ""}
+          type="button"
+          onClick={() => setActiveSection("auction")}
+        >
+          <span>Auction Floor</span>
+          <small>Seller and bidder marketplace</small>
+        </button>
 
-          <div className="item-details">
-            <div className="item-meta">
-              <span>{item.category}</span>
+        <button
+          className={activeSection === "defense" ? "active" : ""}
+          type="button"
+          onClick={() => setActiveSection("defense")}
+        >
+          <span>Defense Lab</span>
+          <small>Siege testing and verification</small>
+        </button>
+      </nav>
 
-              <span className={`status-pill ${item.status}`}>
-                {item.status}
-              </span>
+      {activeSection === "auction" && (
+        <>
+          <section className="workspace-toolbar">
+            <div>
+              <p className="eyebrow">AUCTION FLOOR</p>
+              <h2>Marketplace controls</h2>
             </div>
 
-            <h2>{item.name}</h2>
-            <p>{item.description}</p>
+            <div className="role-switch">
+              <button
+                className={role === "bidder" ? "active" : ""}
+                type="button"
+                onClick={() => setRole("bidder")}
+              >
+                Bidder Mode
+              </button>
 
-            <div className="item-footer">
-              <span>Seller: {item.sellerId}</span>
-              <span>
-                Starting price: ₹{item.startingPrice.toLocaleString()}
-              </span>
+              <button
+                className={role === "seller" ? "active" : ""}
+                type="button"
+                onClick={() => setRole("seller")}
+              >
+                Seller Mode
+              </button>
             </div>
-          </div>
-        </section>
+          </section>
+
+          {item && (
+            <section className="item-card">
+              <div className="item-visual">
+                <span>{item.category?.charAt(0) || "A"}</span>
+              </div>
+
+              <div className="item-details">
+                <div className="item-meta">
+                  <span>{item.category}</span>
+
+                  <span className={`status-pill ${item.status}`}>
+                    {item.status}
+                  </span>
+                </div>
+
+                <h2>{item.name}</h2>
+                <p>{item.description}</p>
+
+                <div className="item-footer">
+                  <span>Seller: {item.sellerId}</span>
+
+                  <span>
+                    Starting price: ₹
+                    {item.startingPrice.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {role === "seller" && (
+            <section className="seller-layout">
+              <form
+                className="panel seller-form"
+                onSubmit={createItem}
+              >
+                <p className="eyebrow">SELLER CONTROL</p>
+                <h2>Create a new auction</h2>
+
+                <label>
+                  Item name
+                  <input
+                    name="name"
+                    value={sellerForm.name}
+                    onChange={updateSellerField}
+                    placeholder="Example: Collector's Keyboard"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Description
+                  <textarea
+                    name="description"
+                    value={sellerForm.description}
+                    onChange={updateSellerField}
+                    placeholder="Describe the item and its condition"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Category
+                  <select
+                    name="category"
+                    value={sellerForm.category}
+                    onChange={updateSellerField}
+                  >
+                    <option>Technology</option>
+                    <option>Collectibles</option>
+                    <option>Art</option>
+                    <option>Fashion</option>
+                    <option>Gaming</option>
+                  </select>
+                </label>
+
+                <label>
+                  Starting price
+                  <input
+                    name="startingPrice"
+                    type="number"
+                    min="1"
+                    value={sellerForm.startingPrice}
+                    onChange={updateSellerField}
+                    placeholder="Enter starting price"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Seller ID
+                  <input
+                    name="sellerId"
+                    value={sellerForm.sellerId}
+                    onChange={updateSellerField}
+                    required
+                  />
+                </label>
+
+                <button type="submit">Create Auction</button>
+              </form>
+
+              <section className="panel seller-status">
+                <p className="eyebrow">ACTIVE AUCTION</p>
+                <h2>Seller overview</h2>
+
+                <div className="seller-price">
+                  <span>Current highest bid</span>
+
+                  <strong>
+                    ₹{auction.amount.toLocaleString()}
+                  </strong>
+                </div>
+
+                <div className="seller-information">
+                  <span>
+                    Leader: {auction.bidderId || "No bidder yet"}
+                  </span>
+
+                  <span>
+                    Accepted bid sequence: {auction.sequence}
+                  </span>
+                </div>
+
+                <button
+                  className="danger-button"
+                  type="button"
+                  onClick={closeAuction}
+                  disabled={item?.status === "closed"}
+                >
+                  {item?.status === "closed"
+                    ? "Auction Closed"
+                    : "Close Auction"}
+                </button>
+
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={resetAuction}
+                >
+                  Reset and Reopen
+                </button>
+
+                {message && <p className="message">{message}</p>}
+              </section>
+            </section>
+          )}
+
+          {role === "bidder" && (
+            <>
+              <section className="hero-card">
+                <p>Current highest bid</p>
+
+                <strong>
+                  ₹{auction.amount.toLocaleString()}
+                </strong>
+
+                <span>
+                  {item?.status === "closed"
+                    ? "Auction closed"
+                    : auction.bidderId
+                      ? `Leader: ${auction.bidderId} · Sequence ${auction.sequence}`
+                      : "Waiting for the opening bid"}
+                </span>
+              </section>
+
+              <section className="grid">
+                <form
+                  className="panel bid-form"
+                  onSubmit={submitBid}
+                >
+                  <h2>Place legitimate bid</h2>
+
+                  <label>
+                    Bidder ID
+                    <input
+                      value={bidderId}
+                      onChange={(event) =>
+                        setBidderId(event.target.value)
+                      }
+                      required
+                    />
+                  </label>
+
+                  <label>
+                    Bid amount
+                    <input
+                      type="number"
+                      min="1"
+                      value={amount}
+                      onChange={(event) =>
+                        setAmount(event.target.value)
+                      }
+                      placeholder="Enter amount"
+                      required
+                    />
+                  </label>
+
+                  <button
+                    type="submit"
+                    disabled={item?.status !== "open"}
+                  >
+                    {item?.status === "open"
+                      ? "Submit Atomic Bid"
+                      : "Auction Closed"}
+                  </button>
+
+                  <button
+                    className="secondary"
+                    type="button"
+                    onClick={resetAuction}
+                  >
+                    Reset Auction
+                  </button>
+
+                  {message && (
+                    <p className="message">{message}</p>
+                  )}
+                </form>
+
+                <section className="panel auction-overview">
+                  <p className="eyebrow">LIVE AUCTION</p>
+                  <h2>Auction overview</h2>
+
+                  <div className="overview-list">
+                    <article>
+                      <span>Status</span>
+                      <strong>{item?.status || "unknown"}</strong>
+                    </article>
+
+                    <article>
+                      <span>Current leader</span>
+                      <strong>
+                        {auction.bidderId || "No bidder yet"}
+                      </strong>
+                    </article>
+
+                    <article>
+                      <span>Accepted sequence</span>
+                      <strong>{auction.sequence}</strong>
+                    </article>
+
+                    <article>
+                      <span>Defense status</span>
+                      <strong>
+                        {invariants.allPassed
+                          ? "Verified"
+                          : "Attention required"}
+                      </strong>
+                    </article>
+                  </div>
+
+                  <button
+                    className="secondary"
+                    type="button"
+                    onClick={() => setActiveSection("defense")}
+                  >
+                    Open Defense Lab
+                  </button>
+                </section>
+              </section>
+            </>
+          )}
+        </>
       )}
 
-      {role === "seller" && (
-        <section className="seller-layout">
-          <form className="panel seller-form" onSubmit={createItem}>
-            <p className="eyebrow">SELLER CONTROL</p>
-            <h2>Create a new auction</h2>
-
-            <label>
-              Item name
-              <input
-                name="name"
-                value={sellerForm.name}
-                onChange={updateSellerField}
-                placeholder="Example: Collector's Keyboard"
-                required
-              />
-            </label>
-
-            <label>
-              Description
-              <textarea
-                name="description"
-                value={sellerForm.description}
-                onChange={updateSellerField}
-                placeholder="Describe the item and its condition"
-                required
-              />
-            </label>
-
-            <label>
-              Category
-              <select
-                name="category"
-                value={sellerForm.category}
-                onChange={updateSellerField}
-              >
-                <option>Technology</option>
-                <option>Collectibles</option>
-                <option>Art</option>
-                <option>Fashion</option>
-                <option>Gaming</option>
-              </select>
-            </label>
-
-            <label>
-              Starting price
-              <input
-                name="startingPrice"
-                type="number"
-                min="1"
-                value={sellerForm.startingPrice}
-                onChange={updateSellerField}
-                placeholder="Enter starting price"
-                required
-              />
-            </label>
-
-            <label>
-              Seller ID
-              <input
-                name="sellerId"
-                value={sellerForm.sellerId}
-                onChange={updateSellerField}
-                required
-              />
-            </label>
-
-            <button type="submit">Create Auction</button>
-          </form>
-
-          <section className="panel seller-status">
-            <p className="eyebrow">ACTIVE AUCTION</p>
-            <h2>Seller overview</h2>
-
-            <div className="seller-price">
-              <span>Current highest bid</span>
-              <strong>₹{auction.amount.toLocaleString()}</strong>
+      {activeSection === "defense" && (
+        <>
+          <section className="lab-header">
+            <div>
+              <p className="eyebrow">DEFENSE LAB</p>
+              <h2>Adversarial testing and verification</h2>
+              <p>
+                Launch controlled concurrency tests and inspect the
+                auction engine’s correctness under pressure.
+              </p>
             </div>
-
-            <div className="seller-information">
-              <span>
-                Leader: {auction.bidderId || "No bidder yet"}
-              </span>
-
-              <span>Accepted bid sequence: {auction.sequence}</span>
-            </div>
-
-            <button
-              className="danger-button"
-              type="button"
-              onClick={closeAuction}
-              disabled={item?.status === "closed"}
-            >
-              {item?.status === "closed"
-                ? "Auction Closed"
-                : "Close Auction"}
-            </button>
 
             <button
               className="secondary"
               type="button"
-              onClick={resetAuction}
+              onClick={() => setActiveSection("auction")}
             >
-              Reset and Reopen
+              Return to Auction Floor
             </button>
-
-            {message && <p className="message">{message}</p>}
-          </section>
-        </section>
-      )}
-
-      {role === "bidder" && (
-        <>
-          <section className="hero-card">
-            <p>Current highest bid</p>
-
-            <strong>₹{auction.amount.toLocaleString()}</strong>
-
-            <span>
-              {item?.status === "closed"
-                ? "Auction closed"
-                : auction.bidderId
-                  ? `Leader: ${auction.bidderId} · Sequence ${auction.sequence}`
-                  : "Waiting for the opening bid"}
-            </span>
           </section>
 
           <section
@@ -629,7 +802,7 @@ function App() {
                 <span>Failed</span>
                 <strong>{siege.failed}</strong>
               </article>
-                      </div>
+            </div>
           </section>
 
           <section
@@ -653,6 +826,7 @@ function App() {
             <div className="invariant-grid">
               <article>
                 <span>Highest bid</span>
+
                 <strong>
                   {invariants.highestNeverDecreased
                     ? "Never decreased"
@@ -662,6 +836,7 @@ function App() {
 
               <article>
                 <span>Replay protection</span>
+
                 <strong>
                   {invariants.duplicateAcceptances === 0
                     ? "Zero duplicates"
@@ -671,6 +846,7 @@ function App() {
 
               <article>
                 <span>Serialization</span>
+
                 <strong>
                   {invariants.orderedSequences
                     ? "Sequence ordered"
@@ -680,6 +856,7 @@ function App() {
 
               <article>
                 <span>Invalid acceptances</span>
+
                 <strong>
                   {invariants.invalidAcceptances}
                 </strong>
@@ -687,106 +864,60 @@ function App() {
             </div>
 
             <p className="proof-count">
-              {invariants.checkedDecisions} decisions independently checked
-              by the server
+              {invariants.checkedDecisions} decisions independently
+              checked by the server
             </p>
           </section>
 
-          <section className="grid">
-            <form className="panel bid-form" onSubmit={submitBid}>
-              <h2>Place legitimate bid</h2>
-
-              <label>
-                Bidder ID
-                <input
-                  value={bidderId}
-                  onChange={(event) =>
-                    setBidderId(event.target.value)
-                  }
-                  required
-                />
-              </label>
-
-              <label>
-                Bid amount
-                <input
-                  type="number"
-                  min="1"
-                  value={amount}
-                  onChange={(event) =>
-                    setAmount(event.target.value)
-                  }
-                  placeholder="Enter amount"
-                  required
-                />
-              </label>
-
-              <button
-                type="submit"
-                disabled={item?.status !== "open"}
-              >
-                {item?.status === "open"
-                  ? "Submit Atomic Bid"
-                  : "Auction Closed"}
-              </button>
-
-              <button
-                className="secondary"
-                type="button"
-                onClick={resetAuction}
-              >
-                Reset Auction
-              </button>
-
-              {message && <p className="message">{message}</p>}
-            </form>
-
-            <section className="panel">
-              <div className="panel-heading">
-                <h2>Live decision feed</h2>
-                <span>{events.length} recent events</span>
+          <section className="panel defense-feed">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">DECISION STREAM</p>
+                <h2>Technical event feed</h2>
               </div>
 
-              <div className="feed">
-                {events.length === 0 && (
-                  <p className="empty">
-                    Submit a bid or launch a siege to begin.
-                  </p>
-                )}
+              <span>{events.length} recent events</span>
+            </div>
 
-                {events.map((decision) => (
-                  <article
-                    className={`event ${
-                      decision.accepted
-                        ? "accepted"
-                        : "rejected"
-                    }`}
-                    key={`${decision.requestId}-${decision.timestamp}`}
-                  >
-                    <div>
-                      <strong>
-                        {decision.accepted
-                          ? "ACCEPTED"
-                          : "BLOCKED"}
-                      </strong>
+            <div className="feed">
+              {events.length === 0 && (
+                <p className="empty">
+                  Launch a siege to begin the defense test.
+                </p>
+              )}
 
-                      <span>
-                        {decision.attackType || "MANUAL_BID"} ·{" "}
-                        {decision.reason}
-                      </span>
-                    </div>
+              {events.map((decision) => (
+                <article
+                  className={`event ${
+                    decision.accepted
+                      ? "accepted"
+                      : "rejected"
+                  }`}
+                  key={`${decision.requestId}-${decision.timestamp}`}
+                >
+                  <div>
+                    <strong>
+                      {decision.accepted
+                        ? "ACCEPTED"
+                        : "BLOCKED"}
+                    </strong>
 
-                    <div className="event-value">
-                      <strong>
-                        ₹{decision.submittedAmount.toLocaleString()}
-                      </strong>
+                    <span>
+                      {decision.attackType || "MANUAL_BID"} ·{" "}
+                      {decision.reason}
+                    </span>
+                  </div>
 
-                      <span>{decision.latencyMs} ms</span>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
+                  <div className="event-value">
+                    <strong>
+                      ₹{decision.submittedAmount.toLocaleString()}
+                    </strong>
+
+                    <span>{decision.latencyMs} ms</span>
+                  </div>
+                </article>
+              ))}
+            </div>
           </section>
         </>
       )}
