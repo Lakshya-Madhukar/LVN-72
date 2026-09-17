@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
 import {
   CartesianGrid,
@@ -9,12 +9,36 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { useAuth } from "./AuthGate";
 import "./App.css";
 
-const API_URL = "http://localhost:3001";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001";
 
-// Returns a fresh siege state for launches and resets.
-function createEmptySiege() {
+/** Formats every monetary value using Indian currency notation. */
+function formatCurrency(value) {
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  }).format(Number(value) || 0);
+}
+
+/** Converts unknown server values into safe numeric values. */
+function toNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+/** Converts milliseconds into a judge-friendly countdown. */
+function formatCountdown(milliseconds) {
+  const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
+/** Produces a blank controlled-siege status object. */
+function emptySiege() {
   return {
     running: false,
     total: 120,
@@ -25,1056 +49,731 @@ function createEmptySiege() {
   };
 }
 
-// Returns a clean set of server-side correctness proofs.
-function createEmptyInvariants() {
+/** Produces a blank server-invariant report. */
+function emptyInvariants() {
   return {
-    allPassed: true,
     highestNeverDecreased: true,
     duplicateAcceptances: 0,
     orderedSequences: true,
     invalidAcceptances: 0,
     checkedDecisions: 0,
+    allPassed: true,
   };
 }
 
-/*
-  Calculates a latency percentile from a sorted list of measurements.
-*/
-function calculatePercentile(values, percentile) {
-  if (values.length === 0) {
-    return 0;
-  }
-
-  const sortedValues = [...values].sort((first, second) => {
-    return first - second;
-  });
-
-  const index = Math.ceil(
-    (percentile / 100) * sortedValues.length,
-  ) - 1;
-
-  return sortedValues[Math.max(0, index)];
+/** Extracts latency from every supported bid event shape. */
+function eventLatency(event) {
+  return toNumber(event.latencyMs ?? event.latency);
 }
 
+/** Extracts the submitted amount from every supported bid event shape. */
+function eventAmount(event) {
+  return toNumber(event.submittedAmount ?? event.amount ?? event.highestBid);
+}
 
-/*
-  App manages the marketplace, seller controls, bidder controls and
-  separate Defense Lab.
-*/
-function App() {
-  const [activeSection, setActiveSection] = useState("auction");
-  const [role, setRole] = useState("bidder");
-  const [item, setItem] = useState(null);
+/** Calculates a latency percentile from a numeric collection. */
+function percentile(values, targetPercentile) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((first, second) => first - second);
+  const index = Math.ceil((targetPercentile / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, index)];
+}
 
-  const [auction, setAuction] = useState({
-    amount: 0,
-    bidderId: null,
-    sequence: 0,
-  });
+/** Generates deterministic confetti pieces without adding another package. */
+function Celebration({ result, onClose }) {
+  const pieces = Array.from({ length: 72 }, (_, index) => ({
+    id: index,
+    left: `${(index * 37) % 100}%`,
+    delay: `${(index % 12) * 0.07}s`,
+    duration: `${2.4 + (index % 7) * 0.18}s`,
+    color: ["#fbbf24", "#f97316", "#22c55e", "#60a5fa", "#f472b6"][
+      index % 5
+    ],
+  }));
 
-  const [amount, setAmount] = useState("");
-  const [bidderId, setBidderId] = useState("human-tester");
-  const [events, setEvents] = useState([]);
-  const [connectionStatus, setConnectionStatus] = useState("connecting");
-  const [message, setMessage] = useState("");
-  const [siege, setSiege] = useState(createEmptySiege());
+  return (
+    <div className={`result-overlay ${result.type}`} role="dialog" aria-modal="true">
+      {result.type === "winner" && (
+        <div className="confetti-field" aria-hidden="true">
+          {pieces.map((piece) => (
+            <i
+              key={piece.id}
+              style={{
+                left: piece.left,
+                animationDelay: piece.delay,
+                animationDuration: piece.duration,
+                background: piece.color,
+              }}
+            />
+          ))}
+        </div>
+      )}
 
-  const [invariants, setInvariants] = useState(
-    createEmptyInvariants(),
+      <section className="result-card">
+        <span className="result-icon">
+          {result.type === "winner" ? "★" : result.type === "eliminated" ? "!" : "↗"}
+        </span>
+        <p className="eyebrow">
+          {result.type === "winner"
+            ? "AUCTION WON"
+            : result.type === "eliminated"
+              ? "PARTICIPATION ENDED"
+              : "AUCTION COMPLETED"}
+        </p>
+        <h2>
+          {result.type === "winner"
+            ? "Congratulations!"
+            : result.type === "eliminated"
+              ? "Bid window expired"
+              : "Better luck next time"}
+        </h2>
+        <p>
+          {result.type === "winner"
+            ? `You secured ${result.itemName} for ${formatCurrency(result.amount)}.`
+            : result.type === "eliminated"
+              ? "You did not place a valid bid before the participation timer ended."
+              : `${result.itemName} was won by another verified bidder.`}
+        </p>
+        <button type="button" onClick={onClose}>
+          Explore other auctions
+        </button>
+      </section>
+    </div>
   );
+}
+
+/** Displays the authenticated role-specific auction application. */
+export default function App() {
+  const { user, token } = useAuth();
+
+  const [page, setPage] = useState("marketplace");
+  const [auctions, setAuctions] = useState([]);
+  const [selectedAuctionId, setSelectedAuctionId] = useState("");
+  const [participant, setParticipant] = useState(null);
+  const [bidAmount, setBidAmount] = useState("");
+  const [decisions, setDecisions] = useState([]);
+  const [message, setMessage] = useState("");
+  const [connection, setConnection] = useState("connecting");
+  const [now, setNow] = useState(Date.now());
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
 
   const [sellerForm, setSellerForm] = useState({
     name: "",
     description: "",
     category: "Technology",
     startingPrice: "",
-    sellerId: "seller-1",
+    minimumIncrement: "",
+    durationMinutes: "10",
+    bidWindowSeconds: "30",
   });
 
-  /*
-    Loads the active item, auction state and server verification state.
-  */
-  async function loadApplication() {
-    const [
-      itemResponse,
-      auctionResponse,
-      invariantResponse,
-    ] = await Promise.all([
-      fetch(`${API_URL}/api/item`),
-      fetch(`${API_URL}/api/auction`),
-      fetch(`${API_URL}/api/invariants`),
-    ]);
+  const [defenseToken, setDefenseToken] = useState(
+    () => sessionStorage.getItem("auction-defense-token") || "",
+  );
+  const [masterPassword, setMasterPassword] = useState("");
+  const [defenseError, setDefenseError] = useState("");
+  const [siege, setSiege] = useState(emptySiege);
+  const [invariants, setInvariants] = useState(emptyInvariants);
+  const [attackFilter, setAttackFilter] = useState("latest");
 
-    const [
-      itemData,
-      auctionData,
-      invariantData,
-    ] = await Promise.all([
-      itemResponse.json(),
-      auctionResponse.json(),
-      invariantResponse.json(),
-    ]);
+  const selectedAuction = useMemo(
+    () => auctions.find((auction) => auction.id === selectedAuctionId) || null,
+    [auctions, selectedAuctionId],
+  );
 
-    setItem(itemData);
-    setAuction(auctionData);
-    setInvariants(invariantData);
+  const openAuctions = useMemo(
+    () => auctions.filter((auction) => auction.status === "open"),
+    [auctions],
+  );
+
+  const sellerAuctions = useMemo(
+    () => auctions.filter((auction) => auction.sellerId === user.id),
+    [auctions, user.id],
+  );
+
+  const validBidFeed = useMemo(
+    () =>
+      decisions
+        .filter(
+          (decision) =>
+            decision.accepted && decision.auctionId === selectedAuctionId,
+        )
+        .slice(0, 12),
+    [decisions, selectedAuctionId],
+  );
+
+  /** Creates standard authenticated API headers. */
+  function authHeaders(json = false) {
+    const headers = { Authorization: `Bearer ${token}` };
+    if (json) headers["Content-Type"] = "application/json";
+    return headers;
   }
 
-  /*
-    Updates one seller form field while preserving all other fields.
-  */
-  function updateSellerField(event) {
-    const { name, value } = event.target;
-
-    setSellerForm((current) => ({
-      ...current,
-      [name]: value,
-    }));
+  /** Creates double-authorized Defence Lab headers. */
+  function defenseHeaders(json = false, overrideToken = defenseToken) {
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      "x-defense-token": overrideToken,
+    };
+    if (json) headers["Content-Type"] = "application/json";
+    return headers;
   }
 
-  /*
-    Creates a new active item through the seller API.
-  */
-  async function createItem(event) {
-    event.preventDefault();
-    setMessage("");
-
-    const response = await fetch(`${API_URL}/api/item`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        ...sellerForm,
-        startingPrice: Number(sellerForm.startingPrice),
-      }),
+  /** Adds or replaces one auction without disturbing the others. */
+  function upsertAuction(updatedAuction) {
+    if (!updatedAuction?.id) return;
+    setAuctions((current) => {
+      const exists = current.some((auction) => auction.id === updatedAuction.id);
+      return exists
+        ? current.map((auction) =>
+            auction.id === updatedAuction.id ? updatedAuction : auction,
+          )
+        : [...current, updatedAuction].sort((a, b) => a.endAt - b.endAt);
     });
+  }
 
-    const result = await response.json();
+  /** Loads every auction card from the new marketplace endpoint. */
+  async function loadAuctions() {
+    try {
+      const response = await fetch(`${API_URL}/api/auctions`);
+      const data = await response.json();
+      if (response.ok) setAuctions(data.auctions || []);
+    } catch {
+      setMessage("The marketplace server is unavailable.");
+    }
+  }
 
-    if (!response.ok) {
-      setMessage(`Item rejected: ${result.reason}`);
-      return;
+  /** Loads the latest correctness report for Defence Lab. */
+  async function loadInvariants() {
+    try {
+      const response = await fetch(`${API_URL}/api/invariants`);
+      if (response.ok) setInvariants(await response.json());
+    } catch {
+      setDefenseError("Invariant report unavailable.");
+    }
+  }
+
+  useEffect(() => {
+    loadAuctions();
+    const clock = setInterval(() => setNow(Date.now()), 250);
+    const refresh = setInterval(loadAuctions, 10000);
+    return () => {
+      clearInterval(clock);
+      clearInterval(refresh);
+    };
+  }, []);
+
+  useEffect(() => {
+    const socket = io(API_URL, { transports: ["websocket", "polling"] });
+
+    function handleDecision(decision) {
+      const normalized = {
+        ...decision,
+        latencyMs: eventLatency(decision),
+        submittedAmount: eventAmount(decision),
+        receivedAt: decision.timestamp || new Date().toISOString(),
+      };
+      setDecisions((current) => [normalized, ...current].slice(0, 400));
     }
 
-    setItem(result.item);
-    setAuction(result.auction);
-    setEvents([]);
-    setSiege(createEmptySiege());
-    setInvariants(createEmptyInvariants());
-    setMessage("New auction created successfully.");
-
-    setSellerForm((current) => ({
-      ...current,
-      name: "",
-      description: "",
-      startingPrice: "",
-    }));
-  }
-
-  /*
-    Sends one legitimate human bid with a unique replay-protection ID.
-  */
-  async function submitBid(event) {
-    event.preventDefault();
-    setMessage("");
-
-    const numericAmount = Number(amount);
-
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-      setMessage("Enter a valid positive bid.");
-      return;
+    function handleAuctionUpdate(auction) {
+      upsertAuction(auction);
     }
 
-    const response = await fetch(`${API_URL}/api/bid`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        amount: numericAmount,
-        bidderId,
-        requestId: crypto.randomUUID(),
-      }),
-    });
+    function handleAuctionEnded(event) {
+      if (event.item) upsertAuction(event.item);
 
-    const result = await response.json();
+      if (
+        user.role === "bidder" &&
+        event.auctionId === selectedAuctionId &&
+        participant
+      ) {
+        setResult({
+          type: event.winnerId === user.id ? "winner" : "lost",
+          itemName: event.item?.name || "the selected item",
+          amount: event.winningBid,
+        });
+      }
+    }
 
-    setMessage(
-      result.accepted
-        ? `Bid ₹${result.submittedAmount.toLocaleString()} accepted`
-        : `Blocked: ${result.reason}`,
+    function handleElimination(event) {
+      if (event.bidderId === user.id && event.auctionId === selectedAuctionId) {
+        setParticipant((current) =>
+          current ? { ...current, eliminated: true } : current,
+        );
+        setResult({
+          type: "eliminated",
+          itemName: selectedAuction?.name || "this auction",
+          amount: 0,
+        });
+      }
+    }
+
+    function handleSiegeProgress(progress) {
+      setSiege({
+        running: true,
+        total: toNumber(progress.total),
+        completed: toNumber(progress.completed),
+        accepted: toNumber(progress.accepted),
+        blocked: toNumber(progress.blocked),
+        failed: toNumber(progress.failed),
+      });
+    }
+
+    function handleSiegeComplete(summary) {
+      setSiege({
+        running: false,
+        total: toNumber(summary.total),
+        completed: toNumber(summary.completed),
+        accepted: toNumber(summary.accepted),
+        blocked: toNumber(summary.blocked),
+        failed: toNumber(summary.failed),
+      });
+      loadInvariants();
+    }
+
+    socket.on("connect", () => setConnection("live"));
+    socket.on("disconnect", () => setConnection("offline"));
+    socket.on("bid-decision", handleDecision);
+    socket.on("auction-created", handleAuctionUpdate);
+    socket.on("auction-updated", handleAuctionUpdate);
+    socket.on("auction-ended", handleAuctionEnded);
+    socket.on("bidder-eliminated", handleElimination);
+    socket.on("demo-auctions-refreshed", (event) =>
+      setAuctions(event.auctions || []),
+    );
+    socket.on("invariant-update", setInvariants);
+    socket.on("siege-progress", handleSiegeProgress);
+    socket.on("siege-complete", handleSiegeComplete);
+    socket.on("siege-error", () =>
+      setSiege((current) => ({ ...current, running: false })),
     );
 
-    if (result.accepted) {
-      setAmount("");
+    return () => socket.disconnect();
+  }, [participant, selectedAuction, selectedAuctionId, user.id, user.role]);
+
+  /** Selects an auction and starts a verified bidder's bid deadline. */
+  async function selectAuction(auction) {
+    setSelectedAuctionId(auction.id);
+    setMessage("");
+    setResult(null);
+
+    if (user.role !== "bidder") return;
+
+    setBusy(true);
+    try {
+      const response = await fetch(`${API_URL}/api/auctions/${auction.id}/join`, {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify({}),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setParticipant(null);
+        setMessage(
+          data.reason === "BIDDER_ELIMINATED"
+            ? "You were already eliminated from this auction."
+            : "This auction is no longer open.",
+        );
+        return;
+      }
+
+      setParticipant(data.participant);
+      upsertAuction(data.auction);
+      setBidAmount(String(data.auction.nextMinimumBid));
+    } catch {
+      setMessage("Unable to enter this auction.");
+    } finally {
+      setBusy(false);
     }
   }
 
-  /*
-    Closes the active auction and prevents later bids at the Redis layer.
-  */
-  async function closeAuction() {
-    const response = await fetch(`${API_URL}/api/item/close`, {
-      method: "POST",
-    });
+  /** Submits an authenticated atomic bid to the selected auction. */
+  async function submitBid(event) {
+    event.preventDefault();
+    if (!selectedAuction || !participant || participant.eliminated) return;
 
-    const result = await response.json();
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await fetch(`${API_URL}/api/bid`, {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify({
+          auctionId: selectedAuction.id,
+          amount: toNumber(bidAmount),
+          requestId: crypto.randomUUID(),
+          attackType: "MANUAL_BID",
+        }),
+      });
+      const decision = await response.json();
 
-    if (!response.ok) {
-      setMessage(result.reason || "Could not close the auction.");
+      if (!response.ok) {
+        setMessage(`Bid blocked: ${decision.reason || "REJECTED"}`);
+        return;
+      }
+
+      setParticipant((current) => ({ ...current, hasBid: true }));
+      setBidAmount(
+        String(decision.highestBid + selectedAuction.minimumIncrement),
+      );
+      setMessage("Bid accepted and serialized successfully.");
+    } catch {
+      setMessage("The bid could not reach the server.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Creates a multi-item auction with seller-controlled timing and increments. */
+  async function createAuction(event) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+
+    try {
+      const response = await fetch(`${API_URL}/api/auctions`, {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify({
+          name: sellerForm.name,
+          description: sellerForm.description,
+          category: sellerForm.category,
+          startingPrice: toNumber(sellerForm.startingPrice),
+          minimumIncrement: toNumber(sellerForm.minimumIncrement),
+          durationSeconds: toNumber(sellerForm.durationMinutes) * 60,
+          bidWindowSeconds: toNumber(sellerForm.bidWindowSeconds),
+        }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setMessage(data.reason || "Auction configuration was rejected.");
+        return;
+      }
+
+      upsertAuction(data.auction);
+      setSellerForm({
+        name: "",
+        description: "",
+        category: "Technology",
+        startingPrice: "",
+        minimumIncrement: "",
+        durationMinutes: "10",
+        bidWindowSeconds: "30",
+      });
+      setMessage("Auction published to the live marketplace.");
+    } catch {
+      setMessage("Unable to publish the auction.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Closes an auction owned by the signed-in seller. */
+  async function closeAuction(auctionId) {
+    setBusy(true);
+    try {
+      const response = await fetch(`${API_URL}/api/auctions/${auctionId}/close`, {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify({}),
+      });
+      const data = await response.json();
+      if (response.ok) upsertAuction(data.auction);
+      else setMessage(data.reason || "Unable to close this auction.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Opens Defence Lab only after verifying its second security token. */
+  async function openDefense() {
+    setDefenseError("");
+    if (!defenseToken) {
+      setPage("defense-lock");
       return;
     }
 
-    setItem(result.item);
-    setAuction(result.auction);
-    setMessage("Auction closed successfully.");
+    try {
+      const response = await fetch(`${API_URL}/api/auth/defense/verify`, {
+        headers: defenseHeaders(),
+      });
+      if (!response.ok) throw new Error("expired");
+      setPage("defense");
+      loadInvariants();
+    } catch {
+      sessionStorage.removeItem("auction-defense-token");
+      setDefenseToken("");
+      setPage("defense-lock");
+    }
   }
 
-  /*
-    Launches the controlled swarm against only the local auction API.
-  */
-  async function launchSiege() {
-    setMessage("");
+  /** Unlocks Defence Lab using its master password. */
+  async function unlockDefense(event) {
+    event.preventDefault();
+    setBusy(true);
+    setDefenseError("");
+    try {
+      const response = await fetch(`${API_URL}/api/auth/defense/unlock`, {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify({ masterPassword }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setDefenseError(data.message || "Master authorization rejected.");
+        return;
+      }
 
-    setSiege({
-      ...createEmptySiege(),
-      running: true,
-    });
+      sessionStorage.setItem("auction-defense-token", data.defenseToken);
+      setDefenseToken(data.defenseToken);
+      setMasterPassword("");
+      setPage("defense");
+      loadInvariants();
+    } catch {
+      setDefenseError("The authorization server is unavailable.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Launches the controlled swarm against the currently selected auction. */
+  async function launchSiege() {
+    const target = selectedAuction?.status === "open" ? selectedAuction : openAuctions[0];
+    if (!target || siege.running) return;
+
+    setDecisions([]);
+    setInvariants(emptyInvariants());
+    setSiege({ ...emptySiege(), running: true });
 
     try {
       const response = await fetch(`${API_URL}/api/siege/start`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          totalRequests: 120,
-        }),
+        headers: defenseHeaders(true),
+        body: JSON.stringify({ auctionId: target.id, totalRequests: 120 }),
       });
-
-      const result = await response.json();
-
       if (!response.ok) {
-        setSiege((current) => ({
-          ...current,
-          running: false,
-        }));
-
-        setMessage(result.reason || "Could not launch siege.");
+        const data = await response.json();
+        setDefenseError(data.reason || "Unable to start siege.");
+        setSiege((current) => ({ ...current, running: false }));
       }
     } catch {
-      setSiege((current) => ({
-        ...current,
-        running: false,
-      }));
-
-      setMessage("Could not contact the siege controller.");
+      setDefenseError("Chaos Bidder Swarm could not reach the server.");
+      setSiege((current) => ({ ...current, running: false }));
     }
   }
 
-  /*
-    Clears existing bids and reopens the current auction.
-  */
-  async function resetAuction() {
-    const response = await fetch(`${API_URL}/api/reset`, {
-      method: "POST",
-    });
-
-    const result = await response.json();
-
-    setAuction(result.auction);
-    setItem(result.item);
-    setEvents([]);
-    setSiege(createEmptySiege());
-    setInvariants(createEmptyInvariants());
-    setMessage("Auction reset successfully.");
-  }
-
-  /*
-    Opens the live Socket.IO connection and subscribes to auction events,
-    seller actions, siege progress and invariant verification.
-  */
-  useEffect(() => {
-    loadApplication().catch(() => {
-      setMessage("Could not load the auction.");
-    });
-
-    const socket = io(API_URL);
-
-    socket.on("connect", () => {
-      setConnectionStatus("connected");
-    });
-
-    socket.on("disconnect", () => {
-      setConnectionStatus("disconnected");
-    });
-
-    socket.on("bid-decision", (decision) => {
-      // Limit rendered events so large tests do not freeze the browser.
-      setEvents((currentEvents) => [
-        decision,
-        ...currentEvents,
-      ].slice(0, 30));
-
-      if (decision.accepted) {
-        setAuction({
-          amount: decision.highestBid,
-          bidderId: decision.bidderId,
-          sequence: decision.sequence,
-        });
-      }
-
-      // Provide immediate siege updates from the bid event stream.
-      if (decision.attackType !== "MANUAL_BID") {
-        setSiege((current) => {
-          const completed = Math.min(
-            current.completed + 1,
-            current.total,
-          );
-
-          return {
-            ...current,
-            completed,
-            accepted:
-              current.accepted + (decision.accepted ? 1 : 0),
-            blocked:
-              current.blocked + (decision.accepted ? 0 : 1),
-            running: completed < current.total,
-          };
-        });
-      }
-    });
-
-    socket.on("auction-reset", (state) => {
-      setAuction(state);
-    });
-
-    socket.on("invariant-update", (proof) => {
-      setInvariants(proof);
-    });
-
-    socket.on(
-      "item-created",
-      ({ item: newItem, auction: newAuction }) => {
-        setItem(newItem);
-        setAuction(newAuction);
-        setEvents([]);
-        setSiege(createEmptySiege());
-        setInvariants(createEmptyInvariants());
-      },
-    );
-
-    socket.on("item-updated", (updatedItem) => {
-      setItem(updatedItem);
-    });
-
-    socket.on(
-      "auction-closed",
-      ({ item: closedItem, auction: finalState }) => {
-        setItem(closedItem);
-        setAuction(finalState);
-      },
-    );
-
-    socket.on("siege-progress", (statistics) => {
-      setSiege({
-        ...statistics,
-        running: true,
-      });
-    });
-
-    socket.on("siege-complete", (summary) => {
-      setSiege({
-        ...summary,
-        running: false,
-      });
-
-      setMessage("Siege completed successfully.");
-    });
-
-    socket.on("siege-error", (error) => {
-      setSiege((current) => ({
-        ...current,
-        running: false,
-      }));
-
-      setMessage(error.message);
-    });
-
-    // Disconnect when React removes the application.
-    return () => {
-      socket.disconnect();
+  const latencyMetrics = useMemo(() => {
+    const values = decisions.map(eventLatency);
+    const average = values.length
+      ? values.reduce((sum, value) => sum + value, 0) / values.length
+      : 0;
+    return {
+      average,
+      p50: percentile(values, 50),
+      p95: percentile(values, 95),
+      maximum: values.length ? Math.max(...values) : 0,
     };
-  }, []);
+  }, [decisions]);
 
-  // Convert recent decision events into chart-friendly data.
-  const latencyData = [...events]
-    .reverse()
-    .map((decision, index) => ({
-      request: index + 1,
-      latency: Number(decision.latencyMs) || 0,
-    }));
-
-  const latencyValues = latencyData.map((point) => {
-    return point.latency;
-  });
-
-  const averageLatency =
-    latencyValues.length > 0
-      ? latencyValues.reduce((total, value) => {
-          return total + value;
-        }, 0) / latencyValues.length
-      : 0;
-
-  const p50Latency = calculatePercentile(
-    latencyValues,
-    50,
+  const chartData = useMemo(
+    () =>
+      decisions
+        .slice(0, 70)
+        .reverse()
+        .map((decision, index) => ({
+          request: index + 1,
+          latency: eventLatency(decision),
+        })),
+    [decisions],
   );
 
-  const p95Latency = calculatePercentile(
-    latencyValues,
-    95,
-  );
+  const filteredDecisions = useMemo(() => {
+    const events = [...decisions];
+    if (attackFilter === "slowest") {
+      return events
+        .filter((event) => !event.accepted)
+        .sort((a, b) => eventLatency(b) - eventLatency(a))
+        .slice(0, 10);
+    }
+    if (attackFilter === "fastest") {
+      return events.sort((a, b) => eventLatency(a) - eventLatency(b)).slice(0, 25);
+    }
+    if (attackFilter === "highest-invalid") {
+      return events
+        .filter((event) => !event.accepted)
+        .sort((a, b) => eventAmount(b) - eventAmount(a))
+        .slice(0, 25);
+    }
+    if (attackFilter === "blocked") return events.filter((event) => !event.accepted).slice(0, 30);
+    if (attackFilter === "accepted") return events.filter((event) => event.accepted).slice(0, 30);
+    return events.slice(0, 30);
+  }, [attackFilter, decisions]);
 
-  const maximumLatency =
-    latencyValues.length > 0
-      ? Math.max(...latencyValues)
-      : 0;
+  const auctionRemaining = selectedAuction ? selectedAuction.endAt - now : 0;
+  const participationRemaining = participant
+    ? participant.deadlineAt - now
+    : 0;
 
   return (
-    <main className="dashboard">
-      <header className="header">
-        <div>
-          <p className="eyebrow">LIVE DEFENSIVE AUCTION ENGINE</p>
-          <h1>Auction Under Siege</h1>
-        </div>
+    <div className="app-shell">
+      <header className="topbar">
+        <button className="brand" type="button" onClick={() => setPage("marketplace")}>
+          <b>A</b>
+          <span><strong>Auction Under Siege</strong><small>Verified atomic marketplace</small></span>
+        </button>
 
-        <div className="header-actions">
-          <span className={`connection ${connectionStatus}`}>
-            {connectionStatus}
-          </span>
-        </div>
+        <nav>
+          <button className={page === "marketplace" ? "active" : ""} type="button" onClick={() => setPage("marketplace")}>
+            {user.role === "seller" ? "Seller Studio" : "Marketplace"}
+          </button>
+          <button className={page.startsWith("defense") ? "active danger" : "danger"} type="button" onClick={openDefense}>
+            Defence Lab <small>{defenseToken ? "Unlocked" : "Master lock"}</small>
+          </button>
+        </nav>
+
+        <div className="connection"><i className={connection} /><span>{connection === "live" ? "Live network" : "Reconnecting"}</span></div>
       </header>
 
-      <nav className="primary-nav">
-        <button
-          className={activeSection === "auction" ? "active" : ""}
-          type="button"
-          onClick={() => setActiveSection("auction")}
-        >
-          <span>Auction Floor</span>
-          <small>Seller and bidder marketplace</small>
-        </button>
-
-        <button
-          className={activeSection === "defense" ? "active" : ""}
-          type="button"
-          onClick={() => setActiveSection("defense")}
-        >
-          <span>Defense Lab</span>
-          <small>Siege testing and verification</small>
-        </button>
-      </nav>
-
-      {activeSection === "auction" && (
-        <>
-          <section className="workspace-toolbar">
+      {page === "marketplace" && (
+        <main className="market-page">
+          <section className="market-hero">
             <div>
-              <p className="eyebrow">AUCTION FLOOR</p>
-              <h2>Marketplace controls</h2>
+              <p className="eyebrow">{user.role.toUpperCase()} EXPERIENCE</p>
+              <h1>{user.role === "seller" ? "Create desire. Control every detail." : "Rare finds. One decisive bid."}</h1>
+              <p>{user.role === "seller" ? "Launch timed listings with protected increments and watch the market react live." : "Explore verified auctions, enter an item room and compete through an atomic bid engine."}</p>
             </div>
-
-            <div className="role-switch">
-              <button
-                className={role === "bidder" ? "active" : ""}
-                type="button"
-                onClick={() => setRole("bidder")}
-              >
-                Bidder Mode
-              </button>
-
-              <button
-                className={role === "seller" ? "active" : ""}
-                type="button"
-                onClick={() => setRole("seller")}
-              >
-                Seller Mode
-              </button>
+            <div className="hero-stats">
+              <div><strong>{openAuctions.length}</strong><span>Live auctions</span></div>
+              <div><strong>{decisions.filter((event) => event.accepted).length}</strong><span>Live valid bids</span></div>
+              <div><strong>0</strong><span>Invalid acceptances</span></div>
             </div>
           </section>
 
-          {item && (
-            <section className="item-card">
-              <div className="item-visual">
-                <span>{item.category?.charAt(0) || "A"}</span>
-              </div>
+          {message && <div className="notice">{message}</div>}
 
-              <div className="item-details">
-                <div className="item-meta">
-                  <span>{item.category}</span>
-
-                  <span className={`status-pill ${item.status}`}>
-                    {item.status}
-                  </span>
-                </div>
-
-                <h2>{item.name}</h2>
-                <p>{item.description}</p>
-
-                <div className="item-footer">
-                  <span>Seller: {item.sellerId}</span>
-
-                  <span>
-                    Starting price: ₹
-                    {item.startingPrice.toLocaleString()}
-                  </span>
-                </div>
-              </div>
-            </section>
-          )}
-
-          {role === "seller" && (
-            <section className="seller-layout">
-              <form
-                className="panel seller-form"
-                onSubmit={createItem}
-              >
-                <p className="eyebrow">SELLER CONTROL</p>
-                <h2>Create a new auction</h2>
-
-                <label>
-                  Item name
-                  <input
-                    name="name"
-                    value={sellerForm.name}
-                    onChange={updateSellerField}
-                    placeholder="Example: Collector's Keyboard"
-                    required
-                  />
-                </label>
-
-                <label>
-                  Description
-                  <textarea
-                    name="description"
-                    value={sellerForm.description}
-                    onChange={updateSellerField}
-                    placeholder="Describe the item and its condition"
-                    required
-                  />
-                </label>
-
-                <label>
-                  Category
-                  <select
-                    name="category"
-                    value={sellerForm.category}
-                    onChange={updateSellerField}
-                  >
-                    <option>Technology</option>
-                    <option>Collectibles</option>
-                    <option>Art</option>
-                    <option>Fashion</option>
-                    <option>Gaming</option>
-                  </select>
-                </label>
-
-                <label>
-                  Starting price
-                  <input
-                    name="startingPrice"
-                    type="number"
-                    min="1"
-                    value={sellerForm.startingPrice}
-                    onChange={updateSellerField}
-                    placeholder="Enter starting price"
-                    required
-                  />
-                </label>
-
-                <label>
-                  Seller ID
-                  <input
-                    name="sellerId"
-                    value={sellerForm.sellerId}
-                    onChange={updateSellerField}
-                    required
-                  />
-                </label>
-
-                <button type="submit">Create Auction</button>
-              </form>
-
-              <section className="panel seller-status">
-                <p className="eyebrow">ACTIVE AUCTION</p>
-                <h2>Seller overview</h2>
-
-                <div className="seller-price">
-                  <span>Current highest bid</span>
-
-                  <strong>
-                    ₹{auction.amount.toLocaleString()}
-                  </strong>
-                </div>
-
-                <div className="seller-information">
-                  <span>
-                    Leader: {auction.bidderId || "No bidder yet"}
-                  </span>
-
-                  <span>
-                    Accepted bid sequence: {auction.sequence}
-                  </span>
-                </div>
-
-                <button
-                  className="danger-button"
-                  type="button"
-                  onClick={closeAuction}
-                  disabled={item?.status === "closed"}
-                >
-                  {item?.status === "closed"
-                    ? "Auction Closed"
-                    : "Close Auction"}
-                </button>
-
-                <button
-                  className="secondary"
-                  type="button"
-                  onClick={resetAuction}
-                >
-                  Reset and Reopen
-                </button>
-
-                {message && <p className="message">{message}</p>}
-              </section>
-            </section>
-          )}
-
-          {role === "bidder" && (
+          {user.role === "seller" ? (
             <>
-              <section className="hero-card">
-                <p>Current highest bid</p>
-
-                <strong>
-                  ₹{auction.amount.toLocaleString()}
-                </strong>
-
-                <span>
-                  {item?.status === "closed"
-                    ? "Auction closed"
-                    : auction.bidderId
-                      ? `Leader: ${auction.bidderId} · Sequence ${auction.sequence}`
-                      : "Waiting for the opening bid"}
-                </span>
-              </section>
-
-              <section className="grid">
-                <form
-                  className="panel bid-form"
-                  onSubmit={submitBid}
-                >
-                  <h2>Place legitimate bid</h2>
-
-                  <label>
-                    Bidder ID
-                    <input
-                      value={bidderId}
-                      onChange={(event) =>
-                        setBidderId(event.target.value)
-                      }
-                      required
-                    />
-                  </label>
-
-                  <label>
-                    Bid amount
-                    <input
-                      type="number"
-                      min="1"
-                      value={amount}
-                      onChange={(event) =>
-                        setAmount(event.target.value)
-                      }
-                      placeholder="Enter amount"
-                      required
-                    />
-                  </label>
-
-                  <button
-                    type="submit"
-                    disabled={item?.status !== "open"}
-                  >
-                    {item?.status === "open"
-                      ? "Submit Atomic Bid"
-                      : "Auction Closed"}
-                  </button>
-
-                  <button
-                    className="secondary"
-                    type="button"
-                    onClick={resetAuction}
-                  >
-                    Reset Auction
-                  </button>
-
-                  {message && (
-                    <p className="message">{message}</p>
-                  )}
+              <section className="seller-layout">
+                <form className="glass-card create-card" onSubmit={createAuction}>
+                  <div className="section-title"><div><p className="eyebrow">NEW LISTING</p><h2>Publish an auction</h2></div><span>Seller verified</span></div>
+                  <label><span>Item name</span><input value={sellerForm.name} onChange={(event) => setSellerForm((form) => ({ ...form, name: event.target.value }))} placeholder="Collector mechanical keyboard" required /></label>
+                  <label><span>Description</span><textarea rows="4" value={sellerForm.description} onChange={(event) => setSellerForm((form) => ({ ...form, description: event.target.value }))} placeholder="Condition, provenance and included accessories..." required /></label>
+                  <div className="form-grid">
+                    <label><span>Category</span><select value={sellerForm.category} onChange={(event) => setSellerForm((form) => ({ ...form, category: event.target.value }))}><option>Technology</option><option>Gaming</option><option>Art</option><option>Audio</option><option>Collectibles</option></select></label>
+                    <label><span>Starting price</span><input type="number" min="1" value={sellerForm.startingPrice} onChange={(event) => setSellerForm((form) => ({ ...form, startingPrice: event.target.value }))} placeholder="2500" required /></label>
+                    <label><span>Minimum bid increase</span><input type="number" min="1" value={sellerForm.minimumIncrement} onChange={(event) => setSellerForm((form) => ({ ...form, minimumIncrement: event.target.value }))} placeholder="250" required /></label>
+                    <label><span>Auction duration (minutes)</span><input type="number" min="1" max="120" value={sellerForm.durationMinutes} onChange={(event) => setSellerForm((form) => ({ ...form, durationMinutes: event.target.value }))} required /></label>
+                    <label><span>Bidder first-bid limit (seconds)</span><input type="number" min="10" max="300" value={sellerForm.bidWindowSeconds} onChange={(event) => setSellerForm((form) => ({ ...form, bidWindowSeconds: event.target.value }))} required /></label>
+                  </div>
+                  <button className="primary" disabled={busy}>Publish secure auction</button>
                 </form>
 
-                <section className="panel auction-overview">
-                  <p className="eyebrow">LIVE AUCTION</p>
-                  <h2>Auction overview</h2>
-
-                  <div className="overview-list">
-                    <article>
-                      <span>Status</span>
-                      <strong>{item?.status || "unknown"}</strong>
-                    </article>
-
-                    <article>
-                      <span>Current leader</span>
-                      <strong>
-                        {auction.bidderId || "No bidder yet"}
-                      </strong>
-                    </article>
-
-                    <article>
-                      <span>Accepted sequence</span>
-                      <strong>{auction.sequence}</strong>
-                    </article>
-
-                    <article>
-                      <span>Defense status</span>
-                      <strong>
-                        {invariants.allPassed
-                          ? "Verified"
-                          : "Attention required"}
-                      </strong>
-                    </article>
+                <section className="glass-card seller-listings">
+                  <div className="section-title"><div><p className="eyebrow">YOUR INVENTORY</p><h2>Seller control</h2></div><strong>{sellerAuctions.length}</strong></div>
+                  <div className="compact-list">
+                    {sellerAuctions.length ? sellerAuctions.map((auction) => (
+                      <article key={auction.id}>
+                        <div><small>{auction.category}</small><h3>{auction.name}</h3><p>{formatCurrency(auction.auction.amount)} · +{formatCurrency(auction.minimumIncrement)}</p></div>
+                        <div className="compact-actions"><span>{formatCountdown(auction.endAt - now)}</span><button type="button" disabled={busy || auction.status !== "open"} onClick={() => closeAuction(auction.id)}>{auction.status === "open" ? "Close" : "Closed"}</button></div>
+                      </article>
+                    )) : <div className="empty-state"><b>+</b><h3>No seller listings yet</h3><p>Your first auction will appear here.</p></div>}
                   </div>
-
-                  <button
-                    className="secondary"
-                    type="button"
-                    onClick={() => setActiveSection("defense")}
-                  >
-                    Open Defense Lab
-                  </button>
                 </section>
               </section>
+
+              <section className="market-section">
+                <div className="market-heading"><div><p className="eyebrow">LIVE MARKET OVERVIEW</p><h2>All verified sellers</h2></div><span>{openAuctions.length} active</span></div>
+                <div className="auction-grid">{openAuctions.map((auction) => <AuctionCard key={auction.id} auction={auction} now={now} onSelect={selectAuction} label="Inspect listing" />)}</div>
+              </section>
+            </>
+          ) : (
+            <>
+              {!selectedAuction ? (
+                <section className="market-section">
+                  <div className="market-heading"><div><p className="eyebrow">CURATED LIVE LOTS</p><h2>Select an auction room</h2></div><span>Selecting starts your first-bid timer</span></div>
+                  <div className="auction-grid">{openAuctions.map((auction) => <AuctionCard key={auction.id} auction={auction} now={now} onSelect={selectAuction} label={busy ? "Entering..." : "Enter auction"} />)}</div>
+                </section>
+              ) : (
+                <section className="bid-room">
+                  <button className="back-button" type="button" onClick={() => { setSelectedAuctionId(""); setParticipant(null); setMessage(""); }}>← All auctions</button>
+                  <div className="bid-room-grid">
+                    <article className="lot-showcase glass-card">
+                      <div className="lot-art"><span>{selectedAuction.category}</span><b>{selectedAuction.name.charAt(0)}</b><small>Verified by {selectedAuction.sellerName}</small></div>
+                      <div className="lot-copy"><p className="eyebrow">LIVE LOT</p><h2>{selectedAuction.name}</h2><p>{selectedAuction.description}</p><div className="lot-details"><div><span>Auction closes in</span><strong>{formatCountdown(auctionRemaining)}</strong></div><div><span>Minimum increase</span><strong>{formatCurrency(selectedAuction.minimumIncrement)}</strong></div><div><span>Seller</span><strong>{selectedAuction.sellerName}</strong></div></div></div>
+                    </article>
+
+                    <article className="bid-panel glass-card">
+                      <p className="eyebrow">ATOMIC BID CONSOLE</p>
+                      <div className="current-price"><span>Current leader</span><strong>{formatCurrency(selectedAuction.auction.amount)}</strong><small>{selectedAuction.auction.bidderName || "Opening price"}</small></div>
+
+                      {!participant?.hasBid && !participant?.eliminated && (
+                        <div className={`participation-timer ${participationRemaining < 10000 ? "urgent" : ""}`}><span>Place one valid bid within</span><strong>{formatCountdown(participationRemaining)}</strong><small>or you will be eliminated from this item</small></div>
+                      )}
+
+                      {participant?.hasBid && <div className="qualified">✓ Participation secured for this auction</div>}
+                      {participant?.eliminated && <div className="eliminated">Participation window expired</div>}
+
+                      <form onSubmit={submitBid}>
+                        <label><span>Your next bid</span><input type="number" min={selectedAuction.nextMinimumBid} value={bidAmount} onChange={(event) => setBidAmount(event.target.value)} disabled={participant?.eliminated || selectedAuction.status !== "open"} required /></label>
+                        <button className="primary" disabled={busy || participant?.eliminated || selectedAuction.status !== "open"}>Submit atomic bid</button>
+                      </form>
+                    </article>
+                  </div>
+
+                  <section className="glass-card live-bids">
+                    <div className="market-heading"><div><p className="eyebrow">REAL-TIME ACTIVITY</p><h2>Valid bids completed</h2></div><span className="live-dot">Live</span></div>
+                    <div className="bid-feed">
+                      {validBidFeed.length ? validBidFeed.map((bid, index) => (
+                        <article key={bid.requestId || index}><i>✓</i><div><strong>{bid.bidderName || bid.bidderId}</strong><span>Atomic sequence #{bid.sequence}</span></div><b>{formatCurrency(bid.highestBid)}</b><small>{eventLatency(bid).toFixed(2)} ms</small></article>
+                      )) : <div className="empty-feed">The first accepted bid will appear here instantly.</div>}
+                    </div>
+                  </section>
+                </section>
+              )}
             </>
           )}
-        </>
+        </main>
       )}
 
-      {activeSection === "defense" && (
-        <>
-          <section className="lab-header">
-            <div>
-              <p className="eyebrow">DEFENSE LAB</p>
-              <h2>Adversarial testing and verification</h2>
-              <p>
-                Launch controlled concurrency tests and inspect the
-                auction engine’s correctness under pressure.
-              </p>
-            </div>
-
-            <button
-              className="secondary"
-              type="button"
-              onClick={() => setActiveSection("auction")}
-            >
-              Return to Auction Floor
-            </button>
-          </section>
-
-          <section
-            className={`siege-panel ${
-              siege.running ? "under-attack" : ""
-            }`}
-          >
-            <div>
-              <p className="eyebrow">
-                {siege.running
-                  ? "SYSTEM UNDER ATTACK"
-                  : "CHAOS BIDDER SWARM"}
-              </p>
-
-              <h2>
-                {siege.running
-                  ? "Siege in progress"
-                  : "Attack simulation ready"}
-              </h2>
-
-              <p className="siege-description">
-                Launch 120 controlled concurrent requests containing
-                malicious and legitimate bid patterns.
-              </p>
-            </div>
-
-            <button
-              className="siege-button"
-              type="button"
-              onClick={launchSiege}
-              disabled={
-                siege.running || item?.status !== "open"
-              }
-            >
-              {siege.running ? "Defending..." : "Launch Siege"}
-            </button>
-
-            <div className="siege-progress">
-              <div
-                className="siege-progress-fill"
-                style={{
-                  width: `${
-                    siege.total > 0
-                      ? (siege.completed / siege.total) * 100
-                      : 0
-                  }%`,
-                }}
-              />
-            </div>
-
-            <div className="siege-statistics">
-              <article>
-                <span>Processed</span>
-                <strong>
-                  {siege.completed}/{siege.total}
-                </strong>
-              </article>
-
-              <article>
-                <span>Accepted</span>
-                <strong className="green">
-                  {siege.accepted}
-                </strong>
-              </article>
-
-              <article>
-                <span>Attacks blocked</span>
-                <strong className="red">
-                  {siege.blocked}
-                </strong>
-              </article>
-
-              <article>
-                <span>Failed</span>
-                <strong>{siege.failed}</strong>
-              </article>
-            </div>
-          </section>
-
-          <section
-            className={`invariant-shield ${
-              invariants.allPassed ? "verified" : "breached"
-            }`}
-          >
-            <div className="shield-heading">
-              <div>
-                <p className="eyebrow">SERVER-VERIFIED PROOF</p>
-                <h2>Invariant Shield</h2>
-              </div>
-
-              <span className="shield-status">
-                {invariants.allPassed
-                  ? "ALL SYSTEMS VERIFIED"
-                  : "INVARIANT BREACH"}
-              </span>
-            </div>
-
-            <div className="invariant-grid">
-              <article>
-                <span>Highest bid</span>
-
-                <strong>
-                  {invariants.highestNeverDecreased
-                    ? "Never decreased"
-                    : "Violation found"}
-                </strong>
-              </article>
-
-              <article>
-                <span>Replay protection</span>
-
-                <strong>
-                  {invariants.duplicateAcceptances === 0
-                    ? "Zero duplicates"
-                    : `${invariants.duplicateAcceptances} failures`}
-                </strong>
-              </article>
-
-              <article>
-                <span>Serialization</span>
-
-                <strong>
-                  {invariants.orderedSequences
-                    ? "Sequence ordered"
-                    : "Order violation"}
-                </strong>
-              </article>
-
-              <article>
-                <span>Invalid acceptances</span>
-
-                <strong>
-                  {invariants.invalidAcceptances}
-                </strong>
-              </article>
-            </div>
-
-            <p className="proof-count">
-              {invariants.checkedDecisions} decisions independently
-              checked by the server
-            </p>
-          </section>
-
-          <section className="latency-panel">
-            <div className="latency-heading">
-              <div>
-                <p className="eyebrow">REAL-TIME PERFORMANCE</p>
-                <h2>Latency telemetry</h2>
-              </div>
-
-              <span>{latencyValues.length} sampled decisions</span>
-            </div>
-
-            <div className="latency-layout">
-              <div className="latency-chart">
-                {latencyData.length === 0 ? (
-                  <p className="empty">
-                    Launch a siege to generate latency measurements.
-                  </p>
-                ) : (
-                  <ResponsiveContainer width="100%" height={250}>
-                    <LineChart data={latencyData}>
-                      <CartesianGrid
-                        stroke="#27272a"
-                        strokeDasharray="4 4"
-                      />
-
-                      <XAxis
-                        dataKey="request"
-                        stroke="#71717a"
-                        tickLine={false}
-                      />
-
-                      <YAxis
-                        stroke="#71717a"
-                        tickLine={false}
-                        unit=" ms"
-                        width={65}
-                      />
-
-                      <Tooltip
-                        contentStyle={{
-                          background: "#111113",
-                          border: "1px solid #3f3f46",
-                          borderRadius: "10px",
-                        }}
-                        labelStyle={{
-                          color: "#a1a1aa",
-                        }}
-                      />
-
-                      <Line
-                        type="monotone"
-                        dataKey="latency"
-                        stroke="#f59e0b"
-                        strokeWidth={3}
-                        dot={false}
-                        animationDuration={250}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
-
-              <div className="latency-statistics">
-                <article>
-                  <span>Average</span>
-                  <strong>
-                    {averageLatency.toFixed(2)} ms
-                  </strong>
-                </article>
-
-                <article>
-                  <span>P50</span>
-                  <strong>{p50Latency.toFixed(2)} ms</strong>
-                </article>
-
-                <article>
-                  <span>P95</span>
-                  <strong>{p95Latency.toFixed(2)} ms</strong>
-                </article>
-
-                <article>
-                  <span>Maximum</span>
-                  <strong>
-                    {maximumLatency.toFixed(2)} ms
-                  </strong>
-                </article>
-              </div>
-            </div>
-          </section>
-
-          <section className="panel defense-feed">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">DECISION STREAM</p>
-                <h2>Technical event feed</h2>
-              </div>
-
-              <span>{events.length} recent events</span>
-            </div>
-
-            <div className="feed">
-              {events.length === 0 && (
-                <p className="empty">
-                  Launch a siege to begin the defense test.
-                </p>
-              )}
-
-              {events.map((decision) => (
-                <article
-                  className={`event ${
-                    decision.accepted
-                      ? "accepted"
-                      : "rejected"
-                  }`}
-                  key={`${decision.requestId}-${decision.timestamp}`}
-                >
-                  <div>
-                    <strong>
-                      {decision.accepted
-                        ? "ACCEPTED"
-                        : "BLOCKED"}
-                    </strong>
-
-                    <span>
-                      {decision.attackType || "MANUAL_BID"} ·{" "}
-                      {decision.reason}
-                    </span>
-                  </div>
-
-                  <div className="event-value">
-                    <strong>
-                      ₹{decision.submittedAmount.toLocaleString()}
-                    </strong>
-
-                    <span>{decision.latencyMs} ms</span>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
-        </>
+      {page === "defense-lock" && (
+        <main className="defense-lock">
+          <section><div className="shield">AUS</div><p className="eyebrow red">RESTRICTED SYSTEM</p><h1>Defence Lab</h1><p>Live adversarial testing requires verified identity and secondary master authorization.</p></section>
+          <form className="glass-card unlock-card" onSubmit={unlockDefense}><span>Level 2 clearance</span><h2>Unlock attack controls</h2><p>The defence token expires automatically after 30 minutes.</p><label><span>Master password</span><input type="password" value={masterPassword} onChange={(event) => setMasterPassword(event.target.value)} placeholder="Enter master password" required /></label>{defenseError && <div className="error-box">{defenseError}</div>}<button className="primary" disabled={busy}>Authorize Defence Lab</button><button className="text-button" type="button" onClick={() => setPage("marketplace")}>Return to marketplace</button></form>
+        </main>
       )}
-    </main>
+
+      {page === "defense" && (
+        <main className="defense-page">
+          <section className="defense-heading"><div><p className="eyebrow red">SECURITY OPERATIONS</p><h1>Defence Lab</h1><p>Observe hostile traffic collide with atomic serialization.</p></div><button type="button" onClick={() => { sessionStorage.removeItem("auction-defense-token"); setDefenseToken(""); setPage("marketplace"); }}>Lock laboratory</button></section>
+
+          {defenseError && <div className="notice danger-notice">{defenseError}</div>}
+
+          <section className={`siege-card ${siege.running ? "under-attack" : ""}`}><div><p className="eyebrow red">{siege.running ? "SYSTEM UNDER ATTACK" : "CHAOS BIDDER SWARM"}</p><h2>{siege.running ? "Defending in real time" : "Pressure-test the live auction"}</h2><p>120 malicious and legitimate requests target an active item concurrently.</p></div><button type="button" onClick={launchSiege} disabled={siege.running}>{siege.running ? "Defending..." : "Launch controlled attack"}</button><div className="progress"><i style={{ width: `${siege.total ? (siege.completed / siege.total) * 100 : 0}%` }} /></div><div className="siege-stats"><div><span>Processed</span><strong>{siege.completed}/{siege.total}</strong></div><div><span>Accepted</span><strong className="green">{siege.accepted}</strong></div><div><span>Blocked</span><strong className="red">{siege.blocked}</strong></div><div><span>Failed</span><strong>{siege.failed}</strong></div></div></section>
+
+          <section className="telemetry-grid">
+            <article className="glass-card invariant-panel"><div className="section-title"><div><p className="eyebrow">INTEGRITY SHIELD</p><h2>Invariant proof</h2></div><span className={invariants.allPassed ? "pass" : "fail"}>{invariants.allPassed ? "Protected" : "Violation"}</span></div><div className="invariant-list"><div><span>Highest never decreased</span><b>{invariants.highestNeverDecreased ? "PASS" : "FAIL"}</b></div><div><span>Duplicate acceptances</span><b>{invariants.duplicateAcceptances}</b></div><div><span>Invalid acceptances</span><b>{invariants.invalidAcceptances}</b></div><div><span>Sequences ordered</span><b>{invariants.orderedSequences ? "PASS" : "FAIL"}</b></div></div></article>
+            <article className="glass-card latency-panel"><div className="section-title"><div><p className="eyebrow">LATENCY TELEMETRY</p><h2>Request performance</h2></div><span className="live-dot">Live</span></div><div className="metric-row"><div><span>Average</span><b>{latencyMetrics.average.toFixed(2)} ms</b></div><div><span>P50</span><b>{latencyMetrics.p50.toFixed(2)} ms</b></div><div><span>P95</span><b>{latencyMetrics.p95.toFixed(2)} ms</b></div><div><span>Maximum</span><b>{latencyMetrics.maximum.toFixed(2)} ms</b></div></div><div className="chart"><ResponsiveContainer width="100%" height={220}><LineChart data={chartData}><CartesianGrid stroke="rgba(255,255,255,.06)" vertical={false} /><XAxis dataKey="request" hide /><YAxis stroke="#65656f" tick={{ fontSize: 10 }} width={36} /><Tooltip contentStyle={{ background: "#101012", border: "1px solid #333", borderRadius: 10 }} /><Line type="monotone" dataKey="latency" stroke="#f59e0b" strokeWidth={2} dot={false} isAnimationActive={false} /></LineChart></ResponsiveContainer></div></article>
+          </section>
+
+          <section className="glass-card intelligence"><div className="market-heading"><div><p className="eyebrow">ATTACK INTELLIGENCE</p><h2>Decision inspection</h2></div><span>{filteredDecisions.length} shown · {decisions.length} retained</span></div><div className="filters">{[["latest","Latest"],["slowest","Top 10 slowest"],["fastest","Fastest"],["highest-invalid","Highest invalid"],["blocked","Blocked"],["accepted","Accepted"]].map(([value,label]) => <button className={attackFilter === value ? "active" : ""} type="button" key={value} onClick={() => setAttackFilter(value)}>{label}</button>)}</div><div className="event-table"><div className="event-head"><span>Decision</span><span>Pattern</span><span>Auction</span><span>Amount</span><span>Latency</span></div>{filteredDecisions.length ? filteredDecisions.map((event, index) => <div className={`event-row ${event.accepted ? "accepted" : "blocked"}`} key={event.requestId || index}><span>{event.accepted ? "Accepted" : "Blocked"}</span><span>{event.attackType || event.reason}</span><span>{event.itemName || event.auctionId}</span><span>{formatCurrency(eventAmount(event))}</span><span>{eventLatency(event).toFixed(2)} ms</span></div>) : <div className="empty-feed">Launch an attack to populate intelligence.</div>}</div></section>
+        </main>
+      )}
+
+      {result && <Celebration result={result} onClose={() => { setResult(null); setSelectedAuctionId(""); setParticipant(null); loadAuctions(); }} />}
+    </div>
   );
 }
 
-export default App;
+/** Renders one marketplace item card with live price and countdown. */
+function AuctionCard({ auction, now, onSelect, label }) {
+  return (
+    <article className="auction-card">
+      <div className={`card-art category-${auction.category.toLowerCase()}`}><span>{auction.category}</span><b>{auction.name.charAt(0)}</b><small>{auction.sellerName}</small></div>
+      <div className="card-body"><div><small>LIVE VERIFIED LOT</small><h3>{auction.name}</h3><p>{auction.description}</p></div><div className="card-price"><span>Current bid</span><strong>{formatCurrency(auction.auction.amount)}</strong></div><div className="card-meta"><span>+{formatCurrency(auction.minimumIncrement)} minimum</span><b>{formatCountdown(auction.endAt - now)}</b></div><button type="button" onClick={() => onSelect(auction)}>{label}</button></div>
+    </article>
+  );
+}
