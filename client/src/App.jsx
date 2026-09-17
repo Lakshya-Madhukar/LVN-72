@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
 import { io } from "socket.io-client";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import "./App.css";
 
 const API_URL = "http://localhost:3001";
@@ -27,6 +36,26 @@ function createEmptyInvariants() {
     checkedDecisions: 0,
   };
 }
+
+/*
+  Calculates a latency percentile from a sorted list of measurements.
+*/
+function calculatePercentile(values, percentile) {
+  if (values.length === 0) {
+    return 0;
+  }
+
+  const sortedValues = [...values].sort((first, second) => {
+    return first - second;
+  });
+
+  const index = Math.ceil(
+    (percentile / 100) * sortedValues.length,
+  ) - 1;
+
+  return sortedValues[Math.max(0, index)];
+}
+
 
 /*
   App manages the marketplace, seller controls, bidder controls and
@@ -378,6 +407,40 @@ function App() {
       socket.disconnect();
     };
   }, []);
+
+  // Convert recent decision events into chart-friendly data.
+  const latencyData = [...events]
+    .reverse()
+    .map((decision, index) => ({
+      request: index + 1,
+      latency: Number(decision.latencyMs) || 0,
+    }));
+
+  const latencyValues = latencyData.map((point) => {
+    return point.latency;
+  });
+
+  const averageLatency =
+    latencyValues.length > 0
+      ? latencyValues.reduce((total, value) => {
+          return total + value;
+        }, 0) / latencyValues.length
+      : 0;
+
+  const p50Latency = calculatePercentile(
+    latencyValues,
+    50,
+  );
+
+  const p95Latency = calculatePercentile(
+    latencyValues,
+    95,
+  );
+
+  const maximumLatency =
+    latencyValues.length > 0
+      ? Math.max(...latencyValues)
+      : 0;
 
   return (
     <main className="dashboard">
@@ -867,6 +930,95 @@ function App() {
               {invariants.checkedDecisions} decisions independently
               checked by the server
             </p>
+          </section>
+
+          <section className="latency-panel">
+            <div className="latency-heading">
+              <div>
+                <p className="eyebrow">REAL-TIME PERFORMANCE</p>
+                <h2>Latency telemetry</h2>
+              </div>
+
+              <span>{latencyValues.length} sampled decisions</span>
+            </div>
+
+            <div className="latency-layout">
+              <div className="latency-chart">
+                {latencyData.length === 0 ? (
+                  <p className="empty">
+                    Launch a siege to generate latency measurements.
+                  </p>
+                ) : (
+                  <ResponsiveContainer width="100%" height={250}>
+                    <LineChart data={latencyData}>
+                      <CartesianGrid
+                        stroke="#27272a"
+                        strokeDasharray="4 4"
+                      />
+
+                      <XAxis
+                        dataKey="request"
+                        stroke="#71717a"
+                        tickLine={false}
+                      />
+
+                      <YAxis
+                        stroke="#71717a"
+                        tickLine={false}
+                        unit=" ms"
+                        width={65}
+                      />
+
+                      <Tooltip
+                        contentStyle={{
+                          background: "#111113",
+                          border: "1px solid #3f3f46",
+                          borderRadius: "10px",
+                        }}
+                        labelStyle={{
+                          color: "#a1a1aa",
+                        }}
+                      />
+
+                      <Line
+                        type="monotone"
+                        dataKey="latency"
+                        stroke="#f59e0b"
+                        strokeWidth={3}
+                        dot={false}
+                        animationDuration={250}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+
+              <div className="latency-statistics">
+                <article>
+                  <span>Average</span>
+                  <strong>
+                    {averageLatency.toFixed(2)} ms
+                  </strong>
+                </article>
+
+                <article>
+                  <span>P50</span>
+                  <strong>{p50Latency.toFixed(2)} ms</strong>
+                </article>
+
+                <article>
+                  <span>P95</span>
+                  <strong>{p95Latency.toFixed(2)} ms</strong>
+                </article>
+
+                <article>
+                  <span>Maximum</span>
+                  <strong>
+                    {maximumLatency.toFixed(2)} ms
+                  </strong>
+                </article>
+              </div>
+            </div>
           </section>
 
           <section className="panel defense-feed">
