@@ -1,3 +1,7 @@
+/*
+  Provides the global page foundation. Component-specific styling remains
+  inside App.css.
+*/
 html {
   background: #09090b;
 }
