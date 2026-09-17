@@ -16,6 +16,18 @@ function createEmptySiege() {
   };
 }
 
+// Returns a clean set of auction correctness proofs.
+function createEmptyInvariants() {
+  return {
+    allPassed: true,
+    highestNeverDecreased: true,
+    duplicateAcceptances: 0,
+    orderedSequences: true,
+    invalidAcceptances: 0,
+    checkedDecisions: 0,
+  };
+}
+
 /*
   App manages both the seller and bidder demonstrations while receiving
   real-time auction events from the backend.
@@ -36,7 +48,8 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState("connecting");
   const [message, setMessage] = useState("");
   const [siege, setSiege] = useState(createEmptySiege());
-
+  const [invariants, setInvariants] = useState(createEmptyInvariants());
+  
   const [sellerForm, setSellerForm] = useState({
     name: "",
     description: "",
@@ -49,18 +62,29 @@ function App() {
     Loads both the active item and authoritative auction state.
   */
   async function loadApplication() {
-    const [itemResponse, auctionResponse] = await Promise.all([
+    const [
+      itemResponse,
+      auctionResponse,
+      invariantResponse,
+    ] = await Promise.all([
       fetch(`${API_URL}/api/item`),
       fetch(`${API_URL}/api/auction`),
+      fetch(`${API_URL}/api/invariants`),
     ]);
 
-    const [itemData, auctionData] = await Promise.all([
+    const [
+      itemData,
+      auctionData,
+      invariantData,
+    ] = await Promise.all([
       itemResponse.json(),
       auctionResponse.json(),
+      invariantResponse.json(),
     ]);
 
     setItem(itemData);
     setAuction(auctionData);
+    setInvariants(invariantData);
   }
 
   /*
@@ -104,6 +128,7 @@ function App() {
     setAuction(result.auction);
     setEvents([]);
     setSiege(createEmptySiege());
+    setInvariants(createEmptyInvariants());
     setMessage("New auction created successfully.");
 
     setSellerForm((current) => ({
@@ -228,7 +253,8 @@ function App() {
     setItem(result.item);
     setEvents([]);
     setSiege(createEmptySiege());
-    setMessage("Auction reset successfully.");
+    setInvariants(createEmptyInvariants());
+    setMessage("Auction reset successfully.");    
   }
 
   /*
@@ -287,10 +313,15 @@ function App() {
     });
 
     socket.on("auction-reset", (state) => {
-      setAuction(state);
-    });
+        setAuction(state);
+      });
 
-    socket.on("item-created", ({ item: newItem, auction: newAuction }) => {
+      // Receive correctness results calculated by the backend.
+      socket.on("invariant-update", (proof) => {
+        setInvariants(proof);
+      });
+
+      socket.on("item-created", ({ item: newItem, auction: newAuction }) => {      
       setItem(newItem);
       setAuction(newAuction);
       setEvents([]);
@@ -598,7 +629,67 @@ function App() {
                 <span>Failed</span>
                 <strong>{siege.failed}</strong>
               </article>
+                      </div>
+          </section>
+
+          <section
+            className={`invariant-shield ${
+              invariants.allPassed ? "verified" : "breached"
+            }`}
+          >
+            <div className="shield-heading">
+              <div>
+                <p className="eyebrow">SERVER-VERIFIED PROOF</p>
+                <h2>Invariant Shield</h2>
+              </div>
+
+              <span className="shield-status">
+                {invariants.allPassed
+                  ? "ALL SYSTEMS VERIFIED"
+                  : "INVARIANT BREACH"}
+              </span>
             </div>
+
+            <div className="invariant-grid">
+              <article>
+                <span>Highest bid</span>
+                <strong>
+                  {invariants.highestNeverDecreased
+                    ? "Never decreased"
+                    : "Violation found"}
+                </strong>
+              </article>
+
+              <article>
+                <span>Replay protection</span>
+                <strong>
+                  {invariants.duplicateAcceptances === 0
+                    ? "Zero duplicates"
+                    : `${invariants.duplicateAcceptances} failures`}
+                </strong>
+              </article>
+
+              <article>
+                <span>Serialization</span>
+                <strong>
+                  {invariants.orderedSequences
+                    ? "Sequence ordered"
+                    : "Order violation"}
+                </strong>
+              </article>
+
+              <article>
+                <span>Invalid acceptances</span>
+                <strong>
+                  {invariants.invalidAcceptances}
+                </strong>
+              </article>
+            </div>
+
+            <p className="proof-count">
+              {invariants.checkedDecisions} decisions independently checked
+              by the server
+            </p>
           </section>
 
           <section className="grid">
