@@ -3,6 +3,7 @@ const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
 const { createClient } = require("redis");
+const { runChaosSwarm } = require("./chaosSwarm");
 
 const PORT = 3001;
 const CLIENT_ORIGIN = "http://localhost:5173";
@@ -28,6 +29,9 @@ app.use(express.json());
 const redis = createClient({
   url: "redis://localhost:6379",
 });
+
+// Prevents multiple swarms from accidentally running simultaneously.
+let siegeRunning = false;
 
 // Log Redis failures instead of silently losing the database connection.
 redis.on("error", (error) => {
@@ -112,7 +116,7 @@ app.get("/api/auction", async (request, response) => {
 */
 app.post("/api/bid", async (request, response) => {
   const startedAt = performance.now();
-  const { amount, bidderId, requestId } = request.body;
+  const { amount, bidderId, requestId, attackType = "MANUAL_BID",} = request.body;
 
   // Reject malformed requests before they reach Redis.
   if (
@@ -141,6 +145,7 @@ app.post("/api/bid", async (request, response) => {
   const latencyMs = Number((performance.now() - startedAt).toFixed(2));
 
   const event = {
+    attackType,
     accepted,
     reason,
     submittedAmount: amount,
@@ -179,6 +184,54 @@ async function startServer() {
     console.log(`Auction API running at http://localhost:${PORT}`);
   });
 }
+
+/*
+  Starts a controlled swarm against only this local API. The request count
+  is capped so the demonstration cannot create uncontrolled traffic.
+*/
+app.post("/api/siege/start", async (request, response) => {
+  if (siegeRunning) {
+    return response.status(409).json({
+      started: false,
+      reason: "SIEGE_ALREADY_RUNNING",
+    });
+  }
+
+  const requestedTotal = Number(request.body.totalRequests) || 120;
+  const totalRequests = Math.min(Math.max(requestedTotal, 10), 300);
+  const auction = await getAuctionState();
+
+  siegeRunning = true;
+
+  response.status(202).json({
+    started: true,
+    totalRequests,
+  });
+
+  runChaosSwarm({
+    apiUrl: `http://127.0.0.1:${PORT}`,
+    totalRequests,
+    highestBid: auction.amount,
+
+    // Stream progress to every connected dashboard.
+    onProgress: (statistics) => {
+      io.emit("siege-progress", statistics);
+    },
+  })
+    .then((summary) => {
+      io.emit("siege-complete", summary);
+    })
+    .catch((error) => {
+      console.error("Siege failed:", error);
+
+      io.emit("siege-error", {
+        message: "The controlled siege could not finish.",
+      });
+    })
+    .finally(() => {
+      siegeRunning = false;
+    });
+});
 
 // Stop immediately if startup fails.
 startServer().catch((error) => {
