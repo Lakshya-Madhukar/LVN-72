@@ -37,6 +37,22 @@ const redis = createClient({
 // Prevent multiple swarms from running simultaneously.
 let siegeRunning = false;
 
+// Remembers accepted request IDs to prove that replayed bids never win twice.
+let acceptedRequestIds = new Set();
+
+// Stores correctness checks independently from the frontend.
+let invariantState = {
+  highestNeverDecreased: true,
+  duplicateAcceptances: 0,
+  orderedSequences: true,
+  invalidAcceptances: 0,
+  checkedDecisions: 0,
+  lastHighest: 0,
+  lastSequence: 0,
+};
+
+// Display Redis connection errors instead of failing silently.
+
 // Display Redis connection errors instead of failing silently.
 redis.on("error", (error) => {
   console.error("Redis error:", error);
@@ -164,6 +180,66 @@ async function getAuctionItem() {
 }
 
 /*
+  Resets proof tracking whenever a fresh auction begins.
+*/
+function resetInvariantState(startingAmount = 0) {
+  acceptedRequestIds = new Set();
+
+  invariantState = {
+    highestNeverDecreased: true,
+    duplicateAcceptances: 0,
+    orderedSequences: true,
+    invalidAcceptances: 0,
+    checkedDecisions: 0,
+    lastHighest: Number(startingAmount),
+    lastSequence: 0,
+  };
+}
+
+/*
+  Evaluates every decision against the auction's core correctness rules.
+*/
+function evaluateInvariants(decision) {
+  invariantState.checkedDecisions += 1;
+
+  if (decision.accepted) {
+    if (decision.highestBid < invariantState.lastHighest) {
+      invariantState.highestNeverDecreased = false;
+    }
+
+    if (decision.sequence <= invariantState.lastSequence) {
+      invariantState.orderedSequences = false;
+    }
+
+    if (
+      !Number.isFinite(decision.submittedAmount) ||
+      decision.submittedAmount <= 0
+    ) {
+      invariantState.invalidAcceptances += 1;
+    }
+
+    if (acceptedRequestIds.has(decision.requestId)) {
+      invariantState.duplicateAcceptances += 1;
+    }
+
+    acceptedRequestIds.add(decision.requestId);
+    invariantState.lastHighest = decision.highestBid;
+    invariantState.lastSequence = decision.sequence;
+  }
+
+  return {
+    ...invariantState,
+
+    // One simple result lets the dashboard show overall system integrity.
+    allPassed:
+      invariantState.highestNeverDecreased &&
+      invariantState.orderedSequences &&
+      invariantState.invalidAcceptances === 0 &&
+      invariantState.duplicateAcceptances === 0,
+  };
+}
+
+/*
   Creates one default item when Redis does not contain an auction item.
   This makes the project usable immediately after its first installation.
 */
@@ -199,6 +275,18 @@ app.get("/api/health", async (request, response) => {
   response.json({
     status: "healthy",
     redis: redisReply,
+  });
+});
+
+// Returns the latest server-side correctness proof.
+app.get("/api/invariants", (request, response) => {
+  response.json({
+    ...invariantState,
+    allPassed:
+      invariantState.highestNeverDecreased &&
+      invariantState.orderedSequences &&
+      invariantState.invalidAcceptances === 0 &&
+      invariantState.duplicateAcceptances === 0,
   });
 });
 
@@ -273,6 +361,9 @@ app.post("/api/item", async (request, response) => {
     requestId: "",
     sequence: "0",
   });
+
+  // Begin a fresh proof session for the new item.
+  resetInvariantState(numericStartingPrice);
 
   const item = await getAuctionItem();
   const auction = await getAuctionState();
@@ -392,6 +483,11 @@ app.post("/api/bid", async (request, response) => {
     timestamp: new Date().toISOString(),
   };
 
+  // Verify the decision before broadcasting it to the dashboard.
+  const invariants = evaluateInvariants(event);
+
+  io.emit("invariant-update", invariants);
+
   // Broadcast accepted and rejected decisions for the live feed.
   io.emit("bid-decision", event);
 
@@ -428,6 +524,9 @@ app.post("/api/reset", async (request, response) => {
       "open",
     );
   }
+
+  // Clear previous proof data and use the item's starting price.
+  resetInvariantState(startingPrice);
 
   const state = await getAuctionState();
   const reopenedItem = await getAuctionItem();
@@ -508,6 +607,10 @@ async function startServer() {
 
   // Seed an item only when Redis has no existing item.
   await ensureDemoItem();
+
+  // Begin proof tracking from the state currently stored in Redis.
+  const initialAuction = await getAuctionState();
+  resetInvariantState(initialAuction.amount);
 
   server.listen(PORT, () => {
     console.log(
