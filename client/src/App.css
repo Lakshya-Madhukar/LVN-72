@@ -130,7 +130,7 @@ select option { color: var(--text); background: #111114; }
 /* Auction card marketplace */
 .market-section { margin-top: 10px; }
 .market-heading { margin-bottom: 24px; align-items: flex-end; }
-.auction-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 18px; }
+.auction-grid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 15px; }
 .auction-card { overflow: hidden; border: 1px solid var(--line); border-radius: 22px; background: var(--panel); box-shadow: 0 22px 60px rgba(0,0,0,.2); transition: transform .2s, border-color .2s; }
 .auction-card:hover { transform: translateY(-5px); border-color: rgba(245,162,11,.25); }
 .card-art { position: relative; min-height: 220px; padding: 18px; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; background: radial-gradient(circle at 50% 47%,rgba(245,162,11,.3),transparent 28%), linear-gradient(145deg,#251a08,#0e0e10 72%); }
@@ -142,6 +142,7 @@ select option { color: var(--text); background: #111114; }
 .category-gaming { background: radial-gradient(circle at 50% 47%,rgba(139,92,246,.33),transparent 29%),linear-gradient(145deg,#1d1232,#0e0e10 72%); }
 .category-art { background: radial-gradient(circle at 50% 47%,rgba(236,72,153,.28),transparent 29%),linear-gradient(145deg,#321126,#0e0e10 72%); }
 .category-audio { background: radial-gradient(circle at 50% 47%,rgba(34,197,94,.25),transparent 29%),linear-gradient(145deg,#0c2917,#0e0e10 72%); }
+.category-collectibles { background: radial-gradient(circle at 50% 47%,rgba(56,189,248,.28),transparent 29%),linear-gradient(145deg,#0c2230,#0e0e10 72%); }
 .card-body { padding: 20px; display: grid; gap: 18px; }
 .card-body > div:first-child > small { color: var(--gold); font-size: .55rem; font-weight: 850; letter-spacing: .12em; }
 .card-body h3 { min-height: 44px; margin: 6px 0 7px; font-size: 1.12rem; line-height: 1.15; letter-spacing: -.025em; }
@@ -149,8 +150,10 @@ select option { color: var(--text); background: #111114; }
 .card-price { display: grid; gap: 4px; }
 .card-price span { color: var(--muted); font-size: .62rem; }
 .card-price strong { color: var(--gold-2); font-size: 1.7rem; letter-spacing: -.045em; }
-.card-meta { padding-top: 13px; display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .62rem; border-top: 1px solid var(--line); }
-.card-meta b { color: var(--text); font-family: ui-monospace,monospace; }
+.card-timer { padding: 14px; display: grid; gap: 4px; text-align: center; border: 1px solid rgba(245,162,11,.19); border-radius: 12px; background: rgba(245,162,11,.065); }
+.card-timer span { color: var(--muted); font-size: .56rem; font-weight: 850; letter-spacing: .12em; }
+.card-timer b { color: #fde68a; font-family: ui-monospace,monospace; font-size: 1.75rem; line-height: 1; letter-spacing: -.04em; }
+.card-meta { padding-top: 13px; display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .59rem; border-top: 1px solid var(--line); }
 .card-body > button { min-height: 43px; color: #090909; font-size: .73rem; font-weight: 900; border: 0; border-radius: 10px; background: linear-gradient(135deg,var(--gold-2),var(--orange)); }
 
 /* Selected bidder room */
@@ -167,20 +170,26 @@ select option { color: var(--text); background: #111114; }
 .lot-details { display: grid; grid-template-columns: repeat(3,1fr); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .lot-details div { padding: 17px 12px 17px 0; display: grid; gap: 6px; }
 .lot-details span { color: var(--muted); font-size: .62rem; }
-.lot-details strong { font-size: .78rem; }
+.lot-details strong { font-size: 1.05rem; }
+.lot-details div:first-child strong { color: #fde68a; font-family: ui-monospace,monospace; font-size: 1.7rem; }
 .bid-panel { padding: 30px; }
 .current-price { margin: 22px 0; padding-bottom: 22px; display: grid; gap: 5px; border-bottom: 1px solid var(--line); }
 .current-price span, .current-price small { color: var(--muted); font-size: .68rem; }
 .current-price strong { color: var(--gold-2); font-size: 3rem; line-height: 1; letter-spacing: -.065em; }
 .participation-timer { margin-bottom: 20px; padding: 15px; display: grid; gap: 4px; border: 1px solid rgba(245,162,11,.2); border-radius: 13px; background: rgba(120,53,15,.12); }
 .participation-timer span, .participation-timer small { color: var(--soft); font-size: .65rem; }
-.participation-timer strong { font-family: ui-monospace,monospace; font-size: 1.7rem; }
+.participation-timer strong { color: #fde68a; font-family: ui-monospace,monospace; font-size: 3rem; line-height: 1; letter-spacing: -.06em; }
 .participation-timer.urgent { color: #fecaca; border-color: rgba(239,68,68,.35); background: rgba(127,29,29,.17); animation: urgent-pulse 1s infinite; }
 .qualified, .eliminated { margin-bottom: 20px; padding: 12px; font-size: .72rem; border-radius: 10px; }
 .qualified { color: #86efac; border: 1px solid rgba(34,197,94,.23); background: rgba(34,197,94,.1); }
 .eliminated { color: #fca5a5; border: 1px solid rgba(239,68,68,.24); background: rgba(127,29,29,.15); }
 .bid-panel form { display: grid; gap: 16px; }
 .live-bids { margin-top: 24px; padding: 30px; }
+.market-pulse { margin-top: 24px; padding: 30px; }
+.activity-grid { display: grid; grid-template-columns: minmax(0,1.15fr) minmax(380px,.85fr); gap: 22px; align-items: stretch; }
+.price-graph { min-height: 320px; padding: 18px 14px 5px; border: 1px solid var(--line); border-radius: 16px; background: rgba(5,5,6,.45); }
+.graph-label { padding: 0 8px 13px; display: flex; justify-content: space-between; color: var(--muted); font-size: .68rem; }
+.graph-label b { color: var(--gold); }
 .live-dot { color: #86efac !important; font-size: .65rem !important; font-weight: 850; text-transform: uppercase; }
 .live-dot::before { margin-right: 6px; content: "●"; }
 .bid-feed { display: grid; }
@@ -190,6 +199,8 @@ select option { color: var(--text); background: #111114; }
 .bid-feed article div strong { font-size: .77rem; }
 .bid-feed article div span, .bid-feed article small { color: var(--muted); font-size: .62rem; }
 .bid-feed article > b { color: var(--gold-2); }
+.bid-feed.detailed { max-height: 320px; overflow-y: auto; padding-right: 5px; }
+.bid-feed em { margin-right: 6px; padding: 2px 5px; color: #93c5fd; font-size: .5rem; font-style: normal; font-weight: 900; letter-spacing: .07em; border: 1px solid rgba(59,130,246,.25); border-radius: 4px; background: rgba(59,130,246,.1); }
 .empty-feed { min-height: 130px; display: grid; place-items: center; color: var(--muted); font-size: .75rem; }
 
 /* Master locked Defence Lab */
@@ -241,6 +252,7 @@ select option { color: var(--text); background: #111114; }
 .filters { margin-bottom: 16px; display: flex; flex-wrap: wrap; gap: 7px; }
 .filters button { padding: 8px 11px; color: var(--muted); font-size: .65rem; font-weight: 750; border: 1px solid var(--line); border-radius: 8px; background: #0c0c0e; }
 .filters button.active { color: #fde68a; border-color: rgba(245,162,11,.3); background: rgba(120,53,15,.16); }
+.filters button b { margin-left: 5px; padding: 2px 5px; color: var(--text); font-size: .56rem; border-radius: 4px; background: rgba(255,255,255,.08); }
 .event-table { overflow-x: auto; border: 1px solid var(--line); border-radius: 13px; }
 .event-head, .event-row { min-width: 760px; display: grid; grid-template-columns: .8fr 1.2fr 1.4fr 1fr .7fr; align-items: center; gap: 13px; }
 .event-head { padding: 11px 15px; color: var(--muted); font-size: .59rem; font-weight: 850; text-transform: uppercase; border-bottom: 1px solid var(--line); background: #0d0d0f; }
@@ -269,11 +281,11 @@ select option { color: var(--text); background: #111114; }
 
 /* Responsive adaptation */
 @media (max-width: 1180px) {
-  .auction-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .auction-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .market-hero { grid-template-columns: 1fr; gap: 38px; }
   .hero-stats { grid-template-columns: repeat(3,1fr); }
   .hero-stats div { align-items: flex-start; flex-direction: column; }
-  .seller-layout, .bid-room-grid, .telemetry-grid { grid-template-columns: 1fr; }
+  .seller-layout, .bid-room-grid, .telemetry-grid, .activity-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 860px) {
@@ -292,6 +304,7 @@ select option { color: var(--text); background: #111114; }
   .shield { width: 170px; height: 200px; }
   .siege-card { grid-template-columns: 1fr; }
   .siege-card > button { width: 100%; }
+  .auction-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 
 @media (max-width: 600px) {

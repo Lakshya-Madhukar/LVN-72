@@ -65,6 +65,86 @@ let invariantState = {
   minimumIncrement: 1,
 };
 
+// Five permanent demonstration lots keep the marketplace active for judges.
+const DEMO_AUCTIONS = [
+  {
+    id: "demo-keyboard",
+    name: "Vintage Mechanical Keyboard",
+    description:
+      "A restored aluminium keyboard with tactile switches and collector keycaps.",
+    category: "Technology",
+    startingPrice: 2500,
+    minimumIncrement: 250,
+    durationSeconds: 480,
+    bidWindowSeconds: 35,
+    sellerId: "seller-nova",
+    sellerName: "Nova Collectives",
+  },
+  {
+    id: "demo-mouse",
+    name: "Limited Edition Gaming Mouse",
+    description:
+      "A numbered lightweight release with a flawless sensor and presentation case.",
+    category: "Gaming",
+    startingPrice: 3200,
+    minimumIncrement: 300,
+    durationSeconds: 600,
+    bidWindowSeconds: 40,
+    sellerId: "seller-orbit",
+    sellerName: "Orbit Gaming",
+  },
+  {
+    id: "demo-tablet",
+    name: "Signed Digital Art Tablet",
+    description:
+      "A professional pen display signed by its original concept-art team.",
+    category: "Art",
+    startingPrice: 8500,
+    minimumIncrement: 500,
+    durationSeconds: 720,
+    bidWindowSeconds: 45,
+    sellerId: "seller-canvas",
+    sellerName: "Canvas House",
+  },
+  {
+    id: "demo-headphones",
+    name: "Studio Reference Headphones",
+    description:
+      "A pristine open-back reference pair supplied with balanced cables and case.",
+    category: "Audio",
+    startingPrice: 6000,
+    minimumIncrement: 400,
+    durationSeconds: 540,
+    bidWindowSeconds: 35,
+    sellerId: "seller-wave",
+    sellerName: "Waveform Studio",
+  },
+  {
+    id: "demo-camera",
+    name: "Classic Street Photography Camera",
+    description:
+      "A serviced rangefinder-style camera with a fast prime lens and leather case.",
+    category: "Collectibles",
+    startingPrice: 12000,
+    minimumIncrement: 750,
+    durationSeconds: 660,
+    bidWindowSeconds: 45,
+    sellerId: "seller-frame",
+    sellerName: "Frame Archive",
+  },
+];
+
+// Clearly named simulated bidders create visible activity during judge demos.
+const DEMO_BIDDERS = [
+  { id: "demo-bot-mira", name: "Demo Bot · Mira" },
+  { id: "demo-bot-aryan", name: "Demo Bot · Aryan" },
+  { id: "demo-bot-zoya", name: "Demo Bot · Zoya" },
+  { id: "demo-bot-kabir", name: "Demo Bot · Kabir" },
+  { id: "demo-bot-isha", name: "Demo Bot · Isha" },
+];
+
+let demoBidCursor = 0;
+
 redis.on("error", (error) => {
   console.error("Redis error:", error);
 });
@@ -243,72 +323,19 @@ async function createAuctionRecord({
  * Seeds multiple sellers and listings so judges immediately see a marketplace.
  */
 async function seedDemoAuctions() {
-  const demoItems = [
-    {
-      id: "demo-keyboard",
-      name: "Vintage Mechanical Keyboard",
-      description:
-        "A restored aluminium keyboard with tactile switches and collector keycaps.",
-      category: "Technology",
-      startingPrice: 2500,
-      minimumIncrement: 250,
-      durationSeconds: 480,
-      bidWindowSeconds: 35,
-      sellerId: "seller-nova",
-      sellerName: "Nova Collectives",
-    },
-    {
-      id: "demo-mouse",
-      name: "Limited Edition Gaming Mouse",
-      description:
-        "A lightweight numbered release with a flawless sensor and presentation case.",
-      category: "Gaming",
-      startingPrice: 3200,
-      minimumIncrement: 300,
-      durationSeconds: 600,
-      bidWindowSeconds: 40,
-      sellerId: "seller-orbit",
-      sellerName: "Orbit Gaming",
-    },
-    {
-      id: "demo-tablet",
-      name: "Signed Digital Art Tablet",
-      description:
-        "A professional pen display signed by its original concept-art team.",
-      category: "Art",
-      startingPrice: 8500,
-      minimumIncrement: 500,
-      durationSeconds: 720,
-      bidWindowSeconds: 45,
-      sellerId: "seller-canvas",
-      sellerName: "Canvas House",
-    },
-    {
-      id: "demo-headphones",
-      name: "Studio Reference Headphones",
-      description:
-        "A pristine open-back reference pair supplied with balanced cables and case.",
-      category: "Audio",
-      startingPrice: 6000,
-      minimumIncrement: 400,
-      durationSeconds: 540,
-      bidWindowSeconds: 35,
-      sellerId: "seller-wave",
-      sellerName: "Waveform Studio",
-    },
-  ];
-
-  await Promise.all(demoItems.map(createAuctionRecord));
+  await Promise.all(DEMO_AUCTIONS.map(createAuctionRecord));
 }
 
 /**
  * Restores demo listings whenever no open auctions remain.
  */
 async function ensureDemoAuctions() {
-  const openAuctions = await listAuctions("open");
+  for (const demoAuction of DEMO_AUCTIONS) {
+    const existing = await getAuctionItem(demoAuction.id);
 
-  if (openAuctions.length === 0) {
-    await seedDemoAuctions();
+    if (!existing || existing.status !== "open" || existing.endAt <= Date.now()) {
+      await createAuctionRecord(demoAuction);
+    }
   }
 }
 
@@ -526,6 +553,16 @@ async function maintainAuctionTimers() {
         winningBid: Number(closeResult[1] || 0),
         endedAt: now,
       });
+
+      // Permanent demo lots restart immediately with fresh prices and timers.
+      const demoConfiguration = DEMO_AUCTIONS.find(
+        (demoAuction) => demoAuction.id === auctionId,
+      );
+
+      if (demoConfiguration) {
+        const restartedAuction = await createAuctionRecord(demoConfiguration);
+        io.emit("auction-restarted", restartedAuction);
+      }
     }
 
     const bidderIds = await redis.sMembers(participantIndexKey(auctionId));
@@ -552,15 +589,49 @@ async function maintainAuctionTimers() {
     }
   }
 
-  // Keeps the judge demo populated even after every current listing expires.
-  const remainingOpenAuctions = await listAuctions("open");
+  // Restores any missing demo lot so at least five remain available.
+  await ensureDemoAuctions();
+}
 
-  if (remainingOpenAuctions.length === 0) {
-    await seedDemoAuctions();
-    io.emit("demo-auctions-refreshed", {
-      auctions: await listAuctions("open"),
-    });
+/**
+ * Submits one clearly labelled simulated bid every few seconds so the judge
+ * dashboard shows an active market even when only one person is testing it.
+ */
+async function submitDemoBid() {
+  if (process.env.DEMO_BIDDING_ENABLED === "false" || siegeRunning) {
+    return;
   }
+
+  const openAuctions = await listAuctions("open");
+
+  if (!openAuctions.length) {
+    return;
+  }
+
+  const auction = openAuctions[demoBidCursor % openAuctions.length];
+  const demoBidder = DEMO_BIDDERS[demoBidCursor % DEMO_BIDDERS.length];
+  const increaseMultiplier = 1 + (demoBidCursor % 3);
+  const amount =
+    auction.auction.amount +
+    auction.minimumIncrement * increaseMultiplier;
+
+  demoBidCursor += 1;
+
+  await fetch(`http://127.0.0.1:${PORT}/api/bid`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-chaos-secret": CHAOS_INTERNAL_SECRET,
+    },
+    body: JSON.stringify({
+      auctionId: auction.id,
+      amount,
+      bidderId: demoBidder.id,
+      bidderName: demoBidder.name,
+      requestId: `demo-bid-${Date.now()}-${demoBidCursor}`,
+      attackType: "SIMULATED_DEMO_BID",
+    }),
+  });
 }
 
 /**
@@ -863,7 +934,7 @@ app.post("/api/bid", authenticateBidAccess, async (request, response) => {
     : getUserProfile(request.user.userId);
 
   const bidderName = request.isChaos
-    ? request.body.bidderId
+    ? request.body.bidderName || request.body.bidderId
     : bidderProfile.name;
 
   if (
@@ -1084,6 +1155,13 @@ async function startServer() {
       console.error("Auction timer error:", error);
     });
   }, 1000);
+
+  // Creates honest, visibly labelled demo activity every four seconds.
+  setInterval(() => {
+    submitDemoBid().catch((error) => {
+      console.error("Demo bidder error:", error);
+    });
+  }, 4000);
 
   server.listen(PORT, () => {
     console.log(`Auction API running at http://localhost:${PORT}`);

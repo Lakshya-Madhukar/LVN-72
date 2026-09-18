@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import {
   CartesianGrid,
@@ -152,11 +152,15 @@ export default function App() {
   const [participant, setParticipant] = useState(null);
   const [bidAmount, setBidAmount] = useState("");
   const [decisions, setDecisions] = useState([]);
+  const [priceHistory, setPriceHistory] = useState({});
   const [message, setMessage] = useState("");
   const [connection, setConnection] = useState("connecting");
   const [now, setNow] = useState(Date.now());
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  const selectedAuctionIdRef = useRef("");
+  const selectedAuctionRef = useRef(null);
+  const participantRef = useRef(null);
 
   const [sellerForm, setSellerForm] = useState({
     name: "",
@@ -203,6 +207,18 @@ export default function App() {
     [decisions, selectedAuctionId],
   );
 
+  const selectedPriceHistory = useMemo(
+    () => priceHistory[selectedAuctionId] || [],
+    [priceHistory, selectedAuctionId],
+  );
+
+  // Keeps Socket.IO handlers current without reconnecting on every price tick.
+  useEffect(() => {
+    selectedAuctionIdRef.current = selectedAuctionId;
+    selectedAuctionRef.current = selectedAuction;
+    participantRef.current = participant;
+  }, [participant, selectedAuction, selectedAuctionId]);
+
   /** Creates standard authenticated API headers. */
   function authHeaders(json = false) {
     const headers = { Authorization: `Bearer ${token}` };
@@ -238,7 +254,25 @@ export default function App() {
     try {
       const response = await fetch(`${API_URL}/api/auctions`);
       const data = await response.json();
-      if (response.ok) setAuctions(data.auctions || []);
+      if (response.ok) {
+        const loadedAuctions = data.auctions || [];
+        setAuctions(loadedAuctions);
+        setPriceHistory((current) => {
+          const next = { ...current };
+          loadedAuctions.forEach((auction) => {
+            if (!next[auction.id]?.length) {
+              next[auction.id] = [
+                {
+                  sequence: auction.auction.sequence || 0,
+                  price: auction.auction.amount,
+                  label: "Opening",
+                },
+              ];
+            }
+          });
+          return next;
+        });
+      }
     } catch {
       setMessage("The marketplace server is unavailable.");
     }
@@ -275,6 +309,20 @@ export default function App() {
         receivedAt: decision.timestamp || new Date().toISOString(),
       };
       setDecisions((current) => [normalized, ...current].slice(0, 400));
+
+      if (normalized.accepted && normalized.auctionId) {
+        setPriceHistory((current) => ({
+          ...current,
+          [normalized.auctionId]: [
+            ...(current[normalized.auctionId] || []),
+            {
+              sequence: normalized.sequence,
+              price: normalized.highestBid,
+              label: normalized.bidderName || normalized.bidderId,
+            },
+          ].slice(-40),
+        }));
+      }
     }
 
     function handleAuctionUpdate(auction) {
@@ -286,8 +334,8 @@ export default function App() {
 
       if (
         user.role === "bidder" &&
-        event.auctionId === selectedAuctionId &&
-        participant
+        event.auctionId === selectedAuctionIdRef.current &&
+        participantRef.current
       ) {
         setResult({
           type: event.winnerId === user.id ? "winner" : "lost",
@@ -298,13 +346,16 @@ export default function App() {
     }
 
     function handleElimination(event) {
-      if (event.bidderId === user.id && event.auctionId === selectedAuctionId) {
+      if (
+        event.bidderId === user.id &&
+        event.auctionId === selectedAuctionIdRef.current
+      ) {
         setParticipant((current) =>
           current ? { ...current, eliminated: true } : current,
         );
         setResult({
           type: "eliminated",
-          itemName: selectedAuction?.name || "this auction",
+          itemName: selectedAuctionRef.current?.name || "this auction",
           amount: 0,
         });
       }
@@ -338,6 +389,19 @@ export default function App() {
     socket.on("bid-decision", handleDecision);
     socket.on("auction-created", handleAuctionUpdate);
     socket.on("auction-updated", handleAuctionUpdate);
+    socket.on("auction-restarted", (auction) => {
+      handleAuctionUpdate(auction);
+      setPriceHistory((current) => ({
+        ...current,
+        [auction.id]: [
+          {
+            sequence: 0,
+            price: auction.auction.amount,
+            label: "Restarted",
+          },
+        ],
+      }));
+    });
     socket.on("auction-ended", handleAuctionEnded);
     socket.on("bidder-eliminated", handleElimination);
     socket.on("demo-auctions-refreshed", (event) =>
@@ -351,7 +415,7 @@ export default function App() {
     );
 
     return () => socket.disconnect();
-  }, [participant, selectedAuction, selectedAuctionId, user.id, user.role]);
+  }, [user.id, user.role]);
 
   /** Selects an auction and starts a verified bidder's bid deadline. */
   async function selectAuction(auction) {
@@ -613,6 +677,21 @@ export default function App() {
     return events.slice(0, 30);
   }, [attackFilter, decisions]);
 
+  const attackCounts = useMemo(
+    () => ({
+      latest: Math.min(30, decisions.length),
+      slowest: Math.min(10, decisions.filter((event) => !event.accepted).length),
+      fastest: Math.min(25, decisions.length),
+      "highest-invalid": Math.min(
+        25,
+        decisions.filter((event) => !event.accepted).length,
+      ),
+      blocked: decisions.filter((event) => !event.accepted).length,
+      accepted: decisions.filter((event) => event.accepted).length,
+    }),
+    [decisions],
+  );
+
   const auctionRemaining = selectedAuction ? selectedAuction.endAt - now : 0;
   const participationRemaining = participant
     ? participant.deadlineAt - now
@@ -689,6 +768,14 @@ export default function App() {
                 <div className="market-heading"><div><p className="eyebrow">LIVE MARKET OVERVIEW</p><h2>All verified sellers</h2></div><span>{openAuctions.length} active</span></div>
                 <div className="auction-grid">{openAuctions.map((auction) => <AuctionCard key={auction.id} auction={auction} now={now} onSelect={selectAuction} label="Inspect listing" />)}</div>
               </section>
+
+              {selectedAuction && (
+                <MarketPulse
+                  auction={selectedAuction}
+                  history={selectedPriceHistory}
+                  bids={validBidFeed}
+                />
+              )}
             </>
           ) : (
             <>
@@ -726,10 +813,9 @@ export default function App() {
 
                   <section className="glass-card live-bids">
                     <div className="market-heading"><div><p className="eyebrow">REAL-TIME ACTIVITY</p><h2>Valid bids completed</h2></div><span className="live-dot">Live</span></div>
-                    <div className="bid-feed">
-                      {validBidFeed.length ? validBidFeed.map((bid, index) => (
-                        <article key={bid.requestId || index}><i>✓</i><div><strong>{bid.bidderName || bid.bidderId}</strong><span>Atomic sequence #{bid.sequence}</span></div><b>{formatCurrency(bid.highestBid)}</b><small>{eventLatency(bid).toFixed(2)} ms</small></article>
-                      )) : <div className="empty-feed">The first accepted bid will appear here instantly.</div>}
+                    <div className="activity-grid">
+                      <PriceGraph history={selectedPriceHistory} />
+                      <BidDetails bids={validBidFeed} />
                     </div>
                   </section>
                 </section>
@@ -759,7 +845,43 @@ export default function App() {
             <article className="glass-card latency-panel"><div className="section-title"><div><p className="eyebrow">LATENCY TELEMETRY</p><h2>Request performance</h2></div><span className="live-dot">Live</span></div><div className="metric-row"><div><span>Average</span><b>{latencyMetrics.average.toFixed(2)} ms</b></div><div><span>P50</span><b>{latencyMetrics.p50.toFixed(2)} ms</b></div><div><span>P95</span><b>{latencyMetrics.p95.toFixed(2)} ms</b></div><div><span>Maximum</span><b>{latencyMetrics.maximum.toFixed(2)} ms</b></div></div><div className="chart"><ResponsiveContainer width="100%" height={220}><LineChart data={chartData}><CartesianGrid stroke="rgba(255,255,255,.06)" vertical={false} /><XAxis dataKey="request" hide /><YAxis stroke="#65656f" tick={{ fontSize: 10 }} width={36} /><Tooltip contentStyle={{ background: "#101012", border: "1px solid #333", borderRadius: 10 }} /><Line type="monotone" dataKey="latency" stroke="#f59e0b" strokeWidth={2} dot={false} isAnimationActive={false} /></LineChart></ResponsiveContainer></div></article>
           </section>
 
-          <section className="glass-card intelligence"><div className="market-heading"><div><p className="eyebrow">ATTACK INTELLIGENCE</p><h2>Decision inspection</h2></div><span>{filteredDecisions.length} shown · {decisions.length} retained</span></div><div className="filters">{[["latest","Latest"],["slowest","Top 10 slowest"],["fastest","Fastest"],["highest-invalid","Highest invalid"],["blocked","Blocked"],["accepted","Accepted"]].map(([value,label]) => <button className={attackFilter === value ? "active" : ""} type="button" key={value} onClick={() => setAttackFilter(value)}>{label}</button>)}</div><div className="event-table"><div className="event-head"><span>Decision</span><span>Pattern</span><span>Auction</span><span>Amount</span><span>Latency</span></div>{filteredDecisions.length ? filteredDecisions.map((event, index) => <div className={`event-row ${event.accepted ? "accepted" : "blocked"}`} key={event.requestId || index}><span>{event.accepted ? "Accepted" : "Blocked"}</span><span>{event.attackType || event.reason}</span><span>{event.itemName || event.auctionId}</span><span>{formatCurrency(eventAmount(event))}</span><span>{eventLatency(event).toFixed(2)} ms</span></div>) : <div className="empty-feed">Launch an attack to populate intelligence.</div>}</div></section>
+          <section className="glass-card intelligence">
+            <div className="market-heading">
+              <div><p className="eyebrow">ATTACK INTELLIGENCE</p><h2>Decision inspection</h2></div>
+              <span>{filteredDecisions.length} shown · {decisions.length} retained</span>
+            </div>
+            <div className="filters">
+              {[
+                ["latest", "Latest"],
+                ["slowest", "Top 10 slowest"],
+                ["fastest", "Fastest"],
+                ["highest-invalid", "Highest invalid"],
+                ["blocked", "Blocked"],
+                ["accepted", "Accepted"],
+              ].map(([value, label]) => (
+                <button
+                  className={attackFilter === value ? "active" : ""}
+                  type="button"
+                  key={value}
+                  onClick={() => setAttackFilter(value)}
+                >
+                  {label} <b>{attackCounts[value]}</b>
+                </button>
+              ))}
+            </div>
+            <div className="event-table">
+              <div className="event-head"><span>Decision</span><span>Pattern</span><span>Auction</span><span>Amount</span><span>Latency</span></div>
+              {filteredDecisions.length ? filteredDecisions.map((event, index) => (
+                <div className={`event-row ${event.accepted ? "accepted" : "blocked"}`} key={event.requestId || index}>
+                  <span>{event.accepted ? "Accepted" : "Blocked"}</span>
+                  <span>{event.attackType || event.reason}</span>
+                  <span>{event.itemName || event.auctionId}</span>
+                  <span>{formatCurrency(eventAmount(event))}</span>
+                  <span>{eventLatency(event).toFixed(2)} ms</span>
+                </div>
+              )) : <div className="empty-feed">No events match this filter.</div>}
+            </div>
+          </section>
         </main>
       )}
 
@@ -768,12 +890,100 @@ export default function App() {
   );
 }
 
+/** Displays the animated price path for one selected auction. */
+function PriceGraph({ history }) {
+  return (
+    <div className="price-graph">
+      <div className="graph-label">
+        <span>Live price movement</span>
+        <b>{history.length} points</b>
+      </div>
+      <ResponsiveContainer width="100%" height={250}>
+        <LineChart data={history} margin={{ top: 12, right: 12, left: 4, bottom: 4 }}>
+          <CartesianGrid stroke="rgba(255,255,255,.055)" vertical={false} />
+          <XAxis dataKey="sequence" stroke="#60606a" tick={{ fontSize: 10 }} />
+          <YAxis stroke="#60606a" tick={{ fontSize: 10 }} width={54} />
+          <Tooltip
+            formatter={(value) => [formatCurrency(value), "Price"]}
+            labelFormatter={(value) => `Atomic sequence #${value}`}
+            contentStyle={{
+              background: "#101012",
+              border: "1px solid #35353a",
+              borderRadius: 11,
+            }}
+          />
+          <Line
+            type="monotone"
+            dataKey="price"
+            stroke="#fbbf24"
+            strokeWidth={3}
+            dot={{ r: 3, fill: "#fbbf24", strokeWidth: 0 }}
+            activeDot={{ r: 6, fill: "#fff" }}
+            animationDuration={500}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/** Displays full accepted-bid details for both seller and bidder dashboards. */
+function BidDetails({ bids }) {
+  return (
+    <div className="bid-feed detailed">
+      {bids.length ? (
+        bids.map((bid, index) => (
+          <article key={bid.requestId || index}>
+            <i>✓</i>
+            <div>
+              <strong>{bid.bidderName || bid.bidderId}</strong>
+              <span>
+                {bid.attackType === "SIMULATED_DEMO_BID" && (
+                  <em>SIMULATED</em>
+                )}
+                Sequence #{bid.sequence} · {eventLatency(bid).toFixed(2)} ms
+              </span>
+            </div>
+            <b>{formatCurrency(bid.highestBid)}</b>
+            <small>
+              {new Date(bid.receivedAt || bid.timestamp).toLocaleTimeString()}
+            </small>
+          </article>
+        ))
+      ) : (
+        <div className="empty-feed">
+          Accepted bids and labelled demo bidders will appear here live.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Gives sellers the same real-time price and bidder visibility as bidders. */
+function MarketPulse({ auction, history, bids }) {
+  return (
+    <section className="glass-card market-pulse">
+      <div className="market-heading">
+        <div>
+          <p className="eyebrow">LIVE MARKET PULSE</p>
+          <h2>{auction.name}</h2>
+        </div>
+        <span>{formatCurrency(auction.auction.amount)} current bid</span>
+      </div>
+      <div className="activity-grid">
+        <PriceGraph history={history} />
+        <BidDetails bids={bids} />
+      </div>
+    </section>
+  );
+}
+
 /** Renders one marketplace item card with live price and countdown. */
 function AuctionCard({ auction, now, onSelect, label }) {
   return (
     <article className="auction-card">
       <div className={`card-art category-${auction.category.toLowerCase()}`}><span>{auction.category}</span><b>{auction.name.charAt(0)}</b><small>{auction.sellerName}</small></div>
-      <div className="card-body"><div><small>LIVE VERIFIED LOT</small><h3>{auction.name}</h3><p>{auction.description}</p></div><div className="card-price"><span>Current bid</span><strong>{formatCurrency(auction.auction.amount)}</strong></div><div className="card-meta"><span>+{formatCurrency(auction.minimumIncrement)} minimum</span><b>{formatCountdown(auction.endAt - now)}</b></div><button type="button" onClick={() => onSelect(auction)}>{label}</button></div>
+      <div className="card-body"><div><small>LIVE VERIFIED LOT</small><h3>{auction.name}</h3><p>{auction.description}</p></div><div className="card-price"><span>Current bid</span><strong>{formatCurrency(auction.auction.amount)}</strong></div><div className="card-timer"><span>AUCTION ENDS IN</span><b>{formatCountdown(auction.endAt - now)}</b></div><div className="card-meta"><span>+{formatCurrency(auction.minimumIncrement)} minimum increase</span><span>{auction.auction.sequence} valid bids</span></div><button type="button" onClick={() => onSelect(auction)}>{label}</button></div>
     </article>
   );
 }
