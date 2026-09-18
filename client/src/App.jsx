@@ -41,7 +41,7 @@ function formatCountdown(milliseconds) {
 function emptySiege() {
   return {
     running: false,
-    total: 120,
+    total: 7000,
     completed: 0,
     accepted: 0,
     blocked: 0,
@@ -158,6 +158,7 @@ export default function App() {
   const [now, setNow] = useState(Date.now());
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState("All");
   const selectedAuctionIdRef = useRef("");
   const selectedAuctionRef = useRef(null);
   const participantRef = useRef(null);
@@ -170,6 +171,7 @@ export default function App() {
     minimumIncrement: "",
     durationMinutes: "10",
     bidWindowSeconds: "30",
+    imageUrl: "",
   });
 
   const [defenseToken, setDefenseToken] = useState(
@@ -194,6 +196,21 @@ export default function App() {
   const sellerAuctions = useMemo(
     () => auctions.filter((auction) => auction.sellerId === user.id),
     [auctions, user.id],
+  );
+
+  const availableCategories = useMemo(
+    () => ["All", ...new Set(openAuctions.map((auction) => auction.category))],
+    [openAuctions],
+  );
+
+  const bidderAuctions = useMemo(
+    () =>
+      categoryFilter === "All"
+        ? openAuctions
+        : openAuctions.filter(
+            (auction) => auction.category === categoryFilter,
+          ),
+    [categoryFilter, openAuctions],
   );
 
   const validBidFeed = useMemo(
@@ -509,6 +526,7 @@ export default function App() {
           minimumIncrement: toNumber(sellerForm.minimumIncrement),
           durationSeconds: toNumber(sellerForm.durationMinutes) * 60,
           bidWindowSeconds: toNumber(sellerForm.bidWindowSeconds),
+          imageUrl: sellerForm.imageUrl,
         }),
       });
       const data = await response.json();
@@ -527,6 +545,7 @@ export default function App() {
         minimumIncrement: "",
         durationMinutes: "10",
         bidWindowSeconds: "30",
+        imageUrl: "",
       });
       setMessage("Auction published to the live marketplace.");
     } catch {
@@ -534,6 +553,32 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  /** Validates and previews a seller-selected image before submission. */
+  function handleSellerImage(event) {
+    const file = event.target.files?.[0];
+
+    if (!file) return;
+
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      setMessage("Choose a PNG, JPEG or WebP image.");
+      event.target.value = "";
+      return;
+    }
+
+    if (file.size > 3 * 1024 * 1024) {
+      setMessage("The item image must be smaller than 3 MB.");
+      event.target.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setSellerForm((form) => ({ ...form, imageUrl: String(reader.result) }));
+      setMessage("Item image ready to publish.");
+    };
+    reader.readAsDataURL(file);
   }
 
   /** Closes an auction owned by the signed-in seller. */
@@ -617,7 +662,7 @@ export default function App() {
       const response = await fetch(`${API_URL}/api/siege/start`, {
         method: "POST",
         headers: defenseHeaders(true),
-        body: JSON.stringify({ auctionId: target.id, totalRequests: 120 }),
+        body: JSON.stringify({ auctionId: target.id, totalRequests: 7000 }),
       });
       if (!response.ok) {
         const data = await response.json();
@@ -741,6 +786,17 @@ export default function App() {
                   <div className="section-title"><div><p className="eyebrow">NEW LISTING</p><h2>Publish an auction</h2></div><span>Seller verified</span></div>
                   <label><span>Item name</span><input value={sellerForm.name} onChange={(event) => setSellerForm((form) => ({ ...form, name: event.target.value }))} placeholder="Collector mechanical keyboard" required /></label>
                   <label><span>Description</span><textarea rows="4" value={sellerForm.description} onChange={(event) => setSellerForm((form) => ({ ...form, description: event.target.value }))} placeholder="Condition, provenance and included accessories..." required /></label>
+                  <label className="image-upload">
+                    <span>Item image</span>
+                    <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleSellerImage} />
+                    <small>PNG, JPEG or WebP · maximum 3 MB</small>
+                  </label>
+                  {sellerForm.imageUrl && (
+                    <div className="seller-image-preview">
+                      <img src={sellerForm.imageUrl} alt="New auction preview" />
+                      <button type="button" onClick={() => setSellerForm((form) => ({ ...form, imageUrl: "" }))}>Remove image</button>
+                    </div>
+                  )}
                   <div className="form-grid">
                     <label><span>Category</span><select value={sellerForm.category} onChange={(event) => setSellerForm((form) => ({ ...form, category: event.target.value }))}><option>Technology</option><option>Gaming</option><option>Art</option><option>Audio</option><option>Collectibles</option></select></label>
                     <label><span>Starting price</span><input type="number" min="1" value={sellerForm.startingPrice} onChange={(event) => setSellerForm((form) => ({ ...form, startingPrice: event.target.value }))} placeholder="2500" required /></label>
@@ -782,14 +838,31 @@ export default function App() {
               {!selectedAuction ? (
                 <section className="market-section">
                   <div className="market-heading"><div><p className="eyebrow">CURATED LIVE LOTS</p><h2>Select an auction room</h2></div><span>Selecting starts your first-bid timer</span></div>
-                  <div className="auction-grid">{openAuctions.map((auction) => <AuctionCard key={auction.id} auction={auction} now={now} onSelect={selectAuction} label={busy ? "Entering..." : "Enter auction"} />)}</div>
+                  <div className="category-filters">
+                    {availableCategories.map((category) => (
+                      <button
+                        className={categoryFilter === category ? "active" : ""}
+                        type="button"
+                        key={category}
+                        onClick={() => setCategoryFilter(category)}
+                      >
+                        {category}
+                        <b>{category === "All" ? openAuctions.length : openAuctions.filter((auction) => auction.category === category).length}</b>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="auction-grid">{bidderAuctions.map((auction) => <AuctionCard key={auction.id} auction={auction} now={now} onSelect={selectAuction} label={busy ? "Entering..." : "Enter auction"} />)}</div>
                 </section>
               ) : (
                 <section className="bid-room">
                   <button className="back-button" type="button" onClick={() => { setSelectedAuctionId(""); setParticipant(null); setMessage(""); }}>← All auctions</button>
                   <div className="bid-room-grid">
                     <article className="lot-showcase glass-card">
-                      <div className="lot-art"><span>{selectedAuction.category}</span><b>{selectedAuction.name.charAt(0)}</b><small>Verified by {selectedAuction.sellerName}</small></div>
+                      <div className="lot-art">
+                        {selectedAuction.imageUrl ? <img src={selectedAuction.imageUrl} alt={selectedAuction.name} /> : <b>{selectedAuction.name.charAt(0)}</b>}
+                        <div className="lot-art-top"><span>{selectedAuction.category}</span></div>
+                        <div className="lot-art-bottom"><small>VERIFIED SELLER</small><strong>{selectedAuction.sellerName}</strong></div>
+                      </div>
                       <div className="lot-copy"><p className="eyebrow">LIVE LOT</p><h2>{selectedAuction.name}</h2><p>{selectedAuction.description}</p><div className="lot-details"><div><span>Auction closes in</span><strong>{formatCountdown(auctionRemaining)}</strong></div><div><span>Minimum increase</span><strong>{formatCurrency(selectedAuction.minimumIncrement)}</strong></div><div><span>Seller</span><strong>{selectedAuction.sellerName}</strong></div></div></div>
                     </article>
 
@@ -838,7 +911,7 @@ export default function App() {
 
           {defenseError && <div className="notice danger-notice">{defenseError}</div>}
 
-          <section className={`siege-card ${siege.running ? "under-attack" : ""}`}><div><p className="eyebrow red">{siege.running ? "SYSTEM UNDER ATTACK" : "CHAOS BIDDER SWARM"}</p><h2>{siege.running ? "Defending in real time" : "Pressure-test the live auction"}</h2><p>120 malicious and legitimate requests target an active item concurrently.</p></div><button type="button" onClick={launchSiege} disabled={siege.running}>{siege.running ? "Defending..." : "Launch controlled attack"}</button><div className="progress"><i style={{ width: `${siege.total ? (siege.completed / siege.total) * 100 : 0}%` }} /></div><div className="siege-stats"><div><span>Processed</span><strong>{siege.completed}/{siege.total}</strong></div><div><span>Accepted</span><strong className="green">{siege.accepted}</strong></div><div><span>Blocked</span><strong className="red">{siege.blocked}</strong></div><div><span>Failed</span><strong>{siege.failed}</strong></div></div></section>
+          <section className={`siege-card ${siege.running ? "under-attack" : ""}`}><div><p className="eyebrow red">{siege.running ? "SYSTEM UNDER ATTACK" : "CHAOS BIDDER SWARM"}</p><h2>{siege.running ? "Defending in real time" : "Pressure-test the live auction"}</h2><p>7,000 malicious and legitimate requests attack an active item through a high-speed controlled worker pool.</p></div><button type="button" onClick={launchSiege} disabled={siege.running}>{siege.running ? "Defending..." : "Launch 7,000-request attack"}</button><div className="progress"><i style={{ width: `${siege.total ? (siege.completed / siege.total) * 100 : 0}%` }} /></div><div className="siege-stats"><div><span>Processed</span><strong>{siege.completed}/{siege.total}</strong></div><div><span>Accepted</span><strong className="green">{siege.accepted}</strong></div><div><span>Blocked</span><strong className="red">{siege.blocked}</strong></div><div><span>Failed</span><strong>{siege.failed}</strong></div></div></section>
 
           <section className="telemetry-grid">
             <article className="glass-card invariant-panel"><div className="section-title"><div><p className="eyebrow">INTEGRITY SHIELD</p><h2>Invariant proof</h2></div><span className={invariants.allPassed ? "pass" : "fail"}>{invariants.allPassed ? "Protected" : "Violation"}</span></div><div className="invariant-list"><div><span>Highest never decreased</span><b>{invariants.highestNeverDecreased ? "PASS" : "FAIL"}</b></div><div><span>Duplicate acceptances</span><b>{invariants.duplicateAcceptances}</b></div><div><span>Invalid acceptances</span><b>{invariants.invalidAcceptances}</b></div><div><span>Sequences ordered</span><b>{invariants.orderedSequences ? "PASS" : "FAIL"}</b></div></div></article>
@@ -982,7 +1055,11 @@ function MarketPulse({ auction, history, bids }) {
 function AuctionCard({ auction, now, onSelect, label }) {
   return (
     <article className="auction-card">
-      <div className={`card-art category-${auction.category.toLowerCase()}`}><span>{auction.category}</span><b>{auction.name.charAt(0)}</b><small>{auction.sellerName}</small></div>
+      <div className={`card-art category-${auction.category.toLowerCase()}`}>
+        {auction.imageUrl ? <img src={auction.imageUrl} alt={auction.name} /> : <b>{auction.name.charAt(0)}</b>}
+        <div className="card-art-top"><span>{auction.category}</span></div>
+        <div className="card-art-bottom"><small>VERIFIED SELLER</small><strong>{auction.sellerName}</strong></div>
+      </div>
       <div className="card-body"><div><small>LIVE VERIFIED LOT</small><h3>{auction.name}</h3><p>{auction.description}</p></div><div className="card-price"><span>Current bid</span><strong>{formatCurrency(auction.auction.amount)}</strong></div><div className="card-timer"><span>AUCTION ENDS IN</span><b>{formatCountdown(auction.endAt - now)}</b></div><div className="card-meta"><span>+{formatCurrency(auction.minimumIncrement)} minimum increase</span><span>{auction.auction.sequence} valid bids</span></div><button type="button" onClick={() => onSelect(auction)}>{label}</button></div>
     </article>
   );

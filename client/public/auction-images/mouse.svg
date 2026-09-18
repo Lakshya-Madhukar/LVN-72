@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800">
+  <defs><radialGradient id="b"><stop stop-color="#32145f"/><stop offset="1" stop-color="#09090b"/></radialGradient><linearGradient id="m" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#a78bfa"/><stop offset=".55" stop-color="#6d28d9"/><stop offset="1" stop-color="#17171b"/></linearGradient><filter id="g"><feGaussianBlur stdDeviation="32"/></filter></defs>
+  <rect width="1200" height="800" fill="url(#b)"/><ellipse cx="600" cy="660" rx="300" ry="55" fill="#8b5cf6" opacity=".35" filter="url(#g)"/>
+  <path d="M600 135c-166 0-270 137-270 333 0 167 103 231 270 231s270-64 270-231c0-196-104-333-270-333z" fill="url(#m)" stroke="#c4b5fd" stroke-opacity=".45" stroke-width="5"/>
+  <path d="M600 138v205M600 343H361" fill="none" stroke="#ddd6fe" stroke-opacity=".45" stroke-width="5"/><rect x="570" y="210" width="60" height="105" rx="30" fill="#111114" stroke="#c4b5fd" stroke-width="4"/><path d="M600 228v65" stroke="#a78bfa" stroke-width="10" stroke-linecap="round"/>
+  <path d="M455 505c75 55 215 55 290 0" fill="none" stroke="#f0abfc" stroke-width="10" stroke-linecap="round" opacity=".6"/>
+  <text x="80" y="105" fill="#ddd6fe" font-family="Arial" font-size="26" font-weight="700" letter-spacing="8">NUMBERED RELEASE</text>
+</svg>

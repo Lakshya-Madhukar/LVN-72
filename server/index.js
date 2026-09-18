@@ -41,7 +41,8 @@ app.use(
     origin: CLIENT_ORIGIN,
   }),
 );
-app.use(express.json());
+// Allows seller image data URLs while keeping request bodies size-limited.
+app.use(express.json({ limit: "5mb" }));
 
 // Creates the verified seller and bidder accounts before requests arrive.
 initializeAuthDatabase();
@@ -52,6 +53,7 @@ const redis = createClient({
 });
 
 let siegeRunning = false;
+let siegeEventSampleCounter = 0;
 let acceptedRequestIds = new Set();
 
 let invariantState = {
@@ -79,6 +81,7 @@ const DEMO_AUCTIONS = [
     bidWindowSeconds: 35,
     sellerId: "seller-nova",
     sellerName: "Nova Collectives",
+    imageUrl: "/auction-images/keyboard.webp",
   },
   {
     id: "demo-mouse",
@@ -92,6 +95,7 @@ const DEMO_AUCTIONS = [
     bidWindowSeconds: 40,
     sellerId: "seller-orbit",
     sellerName: "Orbit Gaming",
+    imageUrl: "/auction-images/mouse.webp",
   },
   {
     id: "demo-tablet",
@@ -105,6 +109,7 @@ const DEMO_AUCTIONS = [
     bidWindowSeconds: 45,
     sellerId: "seller-canvas",
     sellerName: "Canvas House",
+    imageUrl: "/auction-images/tablet.webp",
   },
   {
     id: "demo-headphones",
@@ -118,6 +123,7 @@ const DEMO_AUCTIONS = [
     bidWindowSeconds: 35,
     sellerId: "seller-wave",
     sellerName: "Waveform Studio",
+    imageUrl: "/auction-images/headphones.webp",
   },
   {
     id: "demo-camera",
@@ -131,6 +137,7 @@ const DEMO_AUCTIONS = [
     bidWindowSeconds: 45,
     sellerId: "seller-frame",
     sellerName: "Frame Archive",
+    imageUrl: "/auction-images/camera.webp",
   },
 ];
 
@@ -276,6 +283,7 @@ async function createAuctionRecord({
   bidWindowSeconds,
   sellerId,
   sellerName,
+  imageUrl = "",
 }) {
   const now = Date.now();
   const endAt = now + durationSeconds * 1000;
@@ -293,6 +301,7 @@ async function createAuctionRecord({
     bidWindowSeconds: String(bidWindowSeconds),
     sellerId,
     sellerName,
+    imageUrl,
     status: "open",
     createdAt: String(now),
     startAt: String(now),
@@ -333,7 +342,12 @@ async function ensureDemoAuctions() {
   for (const demoAuction of DEMO_AUCTIONS) {
     const existing = await getAuctionItem(demoAuction.id);
 
-    if (!existing || existing.status !== "open" || existing.endAt <= Date.now()) {
+    if (
+      !existing ||
+      existing.status !== "open" ||
+      existing.endAt <= Date.now() ||
+      existing.imageUrl !== demoAuction.imageUrl
+    ) {
       await createAuctionRecord(demoAuction);
     }
   }
@@ -642,6 +656,13 @@ function validateAuctionInput(body) {
   const minimumIncrement = Number(body.minimumIncrement);
   const durationSeconds = Number(body.durationSeconds);
   const bidWindowSeconds = Number(body.bidWindowSeconds);
+  const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl : "";
+
+  // Only local demo artwork or common browser-safe image data URLs are stored.
+  const imageIsValid =
+    imageUrl === "" ||
+    imageUrl.startsWith("/auction-images/") ||
+    /^data:image\/(png|jpeg|webp);base64,/i.test(imageUrl);
 
   const valid =
     typeof body.name === "string" &&
@@ -659,7 +680,9 @@ function validateAuctionInput(body) {
     durationSeconds <= 7200 &&
     Number.isFinite(bidWindowSeconds) &&
     bidWindowSeconds >= 10 &&
-    bidWindowSeconds <= Math.min(300, durationSeconds);
+    bidWindowSeconds <= Math.min(300, durationSeconds) &&
+    imageIsValid &&
+    imageUrl.length <= 5_000_000;
 
   return {
     valid,
@@ -671,6 +694,7 @@ function validateAuctionInput(body) {
       minimumIncrement,
       durationSeconds,
       bidWindowSeconds,
+      imageUrl,
     },
   };
 }
@@ -1002,13 +1026,31 @@ app.post("/api/bid", authenticateBidAccess, async (request, response) => {
     timestamp: new Date().toISOString(),
   };
 
+  let shouldBroadcastDecision = true;
+
   if (request.isChaos) {
-    io.emit("invariant-update", evaluateInvariants(event));
+    const invariants = evaluateInvariants(event);
+    siegeEventSampleCounter += 1;
+
+    // All decisions are verified, but the visual feed samples rejected events
+    // so 7,000 React updates do not freeze the judge dashboard.
+    shouldBroadcastDecision =
+      accepted ||
+      attackType === "SIMULATED_DEMO_BID" ||
+      siegeEventSampleCounter % 20 === 0;
+
+    if (shouldBroadcastDecision) {
+      io.emit("invariant-update", invariants);
+    }
   }
 
-  // Every bidder viewing this item receives valid bids in real time.
-  io.emit("bid-decision", event);
-  io.emit("auction-updated", await getAuctionView(auctionId));
+  if (shouldBroadcastDecision) {
+    io.emit("bid-decision", event);
+  }
+
+  if (accepted) {
+    io.emit("auction-updated", await getAuctionView(auctionId));
+  }
 
   return response.status(accepted ? 201 : 409).json(event);
 });
@@ -1053,10 +1095,11 @@ app.post(
       });
     }
 
-    const requestedTotal = Number(request.body.totalRequests) || 120;
-    const totalRequests = Math.min(Math.max(requestedTotal, 10), 300);
+    const requestedTotal = Number(request.body.totalRequests) || 7000;
+    const totalRequests = Math.min(Math.max(requestedTotal, 10), 7000);
 
     siegeRunning = true;
+    siegeEventSampleCounter = 0;
     resetInvariantState(
       auction.auction.amount,
       auction.minimumIncrement,

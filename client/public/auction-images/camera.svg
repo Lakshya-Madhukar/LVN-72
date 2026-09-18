@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800">
+  <defs><linearGradient id="b" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#102f43"/><stop offset="1" stop-color="#09090b"/></linearGradient><radialGradient id="l"><stop stop-color="#7dd3fc"/><stop offset=".35" stop-color="#075985"/><stop offset=".75" stop-color="#111827"/><stop offset="1" stop-color="#020617"/></radialGradient><filter id="g"><feGaussianBlur stdDeviation="28"/></filter></defs>
+  <rect width="1200" height="800" fill="url(#b)"/><ellipse cx="600" cy="650" rx="390" ry="55" fill="#38bdf8" opacity=".22" filter="url(#g)"/>
+  <path d="M275 260h165l45-85h235l50 85h155c48 0 85 37 85 85v260c0 48-37 85-85 85H275c-48 0-85-37-85-85V345c0-48 37-85 85-85z" fill="#202026" stroke="#a1a1aa" stroke-width="8"/><rect x="230" y="300" width="230" height="85" rx="18" fill="#0f172a"/><circle cx="625" cy="475" r="170" fill="#09090b" stroke="#71717a" stroke-width="18"/><circle cx="625" cy="475" r="130" fill="url(#l)" stroke="#bae6fd" stroke-opacity=".35" stroke-width="7"/><circle cx="625" cy="475" r="48" fill="#020617"/><rect x="805" y="305" width="105" height="72" rx="14" fill="#111827"/><circle cx="858" cy="341" r="21" fill="#fbbf24"/>
+  <text x="80" y="105" fill="#bae6fd" font-family="Arial" font-size="26" font-weight="700" letter-spacing="8">FRAME ARCHIVE</text>
+</svg>

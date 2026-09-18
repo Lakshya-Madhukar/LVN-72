@@ -103,31 +103,61 @@ async function runChaosSwarm({
     failed: 0,
   };
 
-  const tasks = Array.from({ length: totalRequests }, async (_, index) => {
-    const bid = createChaosBid(
-      index,
-      highestBid,
-      minimumIncrement,
-      auctionId,
-    );
+  // The bounded pool avoids exhausting local sockets with 7,000 simultaneous
+  // fetch objects while still creating heavy concurrent pressure.
+  const workerCount = Math.min(350, totalRequests);
+  let nextRequestIndex = 0;
+  let lastProgressUpdate = 0;
 
-    try {
-      const decision = await sendChaosBid(apiUrl, bid, chaosSecret);
+  /** Publishes useful progress intervals without flooding Socket.IO. */
+  function publishProgress(force = false) {
+    const currentTime = Date.now();
 
-      if (decision.accepted) {
-        statistics.accepted += 1;
-      } else {
-        statistics.blocked += 1;
-      }
-    } catch {
-      statistics.failed += 1;
+    if (
+      force ||
+      statistics.completed % 50 === 0 ||
+      currentTime - lastProgressUpdate >= 100
+    ) {
+      lastProgressUpdate = currentTime;
+      onProgress({ ...statistics });
     }
+  }
 
-    statistics.completed += 1;
-    onProgress({ ...statistics });
-  });
+  /** Claims requests from the shared queue until all 7,000 are complete. */
+  async function runWorker() {
+    while (nextRequestIndex < totalRequests) {
+      const index = nextRequestIndex;
+      nextRequestIndex += 1;
 
-  await Promise.all(tasks);
+      const bid = createChaosBid(
+        index,
+        highestBid,
+        minimumIncrement,
+        auctionId,
+      );
+
+      try {
+        const decision = await sendChaosBid(apiUrl, bid, chaosSecret);
+
+        if (decision.accepted) {
+          statistics.accepted += 1;
+        } else {
+          statistics.blocked += 1;
+        }
+      } catch {
+        statistics.failed += 1;
+      }
+
+      statistics.completed += 1;
+      publishProgress();
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: workerCount }, () => runWorker()),
+  );
+
+  publishProgress(true);
 
   return {
     ...statistics,
